@@ -3,6 +3,7 @@ import { JiraClient, type JiraIssue } from "./jira/client.js";
 import { detectRepo, toTaskSpec, type RepoDetection } from "./jira/mapToTask.js";
 import { runCloseLoop } from "./engine/loop.js";
 import { runClaudeTurn } from "./engine/claudeEngine.js";
+import { parseProposalResponse } from "./engine/proposal.js";
 import { createMergeRequest, pushBranch } from "./gitlab.js";
 import {
   startJob,
@@ -68,6 +69,7 @@ export interface Proposal {
   repo: string;
   descriptionShort: string;
   plan: string;
+  acceptanceCriteria: string[];
   costUsd: number;
 }
 
@@ -87,15 +89,30 @@ const declinedKeys = new Set<string>();
 // Read-only: explores the repo but is denied Edit/Write/MultiEdit outright
 // (not just the usual sensitive-path subset) so a "preview" can never itself
 // change anything before the human has approved doing so.
-async function proposeSolution(task: TaskSpec, repoPath: string): Promise<{ plan: string; costUsd: number }> {
+//
+// The acceptance criteria produced here are a contract, not a suggestion: once the
+// human approves this proposal they're frozen into PendingApproval/TaskSpec and never
+// regenerated — implement only ever reads them for prompt context, it has no path to
+// change them (TaskSpec is never mutated after dispatch). Reduces scope drift the same
+// way Avengers Harness's frozen-acceptance-tests idea does, just without a separate
+// executable-test layer.
+async function proposeSolution(task: TaskSpec, repoPath: string): Promise<{ plan: string; acceptanceCriteria: string[]; costUsd: number }> {
   const prompt = [
     `Задача ${task.id}: ${task.title}`,
     "",
     task.description,
     "",
     "Не редактируй и не создавай файлы — только изучи код (Read/Grep/Glob).",
-    "В 2-4 коротких предложениях на русском опиши: в чём проблема и что именно",
-    "ты планируешь изменить, чтобы её решить.",
+    "Ответь строго в этом формате, на русском:",
+    "",
+    "ПЛАН:",
+    "<2-4 коротких предложения: в чём проблема и что именно ты планируешь изменить>",
+    "",
+    "КРИТЕРИИ ПРИЁМКИ:",
+    "- <конкретный, проверяемый критерий>",
+    "- <ещё один>",
+    "(3-7 критериев — что именно должно стать верным, чтобы задача считалась решённой;",
+    "формулируй так, чтобы по каждому можно было однозначно сказать да или нет)",
   ].join("\n");
   const turn = await runClaudeTurn({
     cwd: repoPath,
@@ -104,7 +121,8 @@ async function proposeSolution(task: TaskSpec, repoPath: string): Promise<{ plan
     disallowedToolsOverride: "Bash,Edit,Write,MultiEdit",
     model: config.models.propose,
   });
-  return { plan: turn.resultText, costUsd: turn.totalCostUsd };
+  const { plan, acceptanceCriteria } = parseProposalResponse(turn.resultText);
+  return { plan, acceptanceCriteria, costUsd: turn.totalCostUsd };
 }
 
 // Shared by proposeNext (auto-picked, whatever's top of the JQL order) and
@@ -139,7 +157,7 @@ async function proposeIssue(
   await onAnalyzing?.(issue.key);
 
   const task = toTaskSpec(issue);
-  const { plan, costUsd } = await proposeSolution(task, repo.path);
+  const { plan, acceptanceCriteria, costUsd } = await proposeSolution(task, repo.path);
 
   setPendingApproval({
     issueKey: issue.key,
@@ -148,12 +166,21 @@ async function proposeIssue(
     description: issue.description,
     descriptionShort: issue.description.slice(0, 300),
     plan,
+    acceptanceCriteria,
     costUsd,
   });
 
   return {
     kind: "proposed",
-    proposal: { issueKey: issue.key, title: issue.summary, repo: detection.kind, descriptionShort: issue.description.slice(0, 300), plan, costUsd },
+    proposal: {
+      issueKey: issue.key,
+      title: issue.summary,
+      repo: detection.kind,
+      descriptionShort: issue.description.slice(0, 300),
+      plan,
+      acceptanceCriteria,
+      costUsd,
+    },
   };
 }
 
@@ -196,7 +223,7 @@ export async function confirmPending(): Promise<QueueRunOutcome | null> {
 
   const jira = new JiraClient(config.jira.baseUrl, config.jira.token);
   const issue: JiraIssue = { key: pending.issueKey, summary: pending.title, description: pending.description };
-  const outcome = await dispatchIssue(jira, issue);
+  const outcome = await dispatchIssue(jira, issue, pending.acceptanceCriteria);
   // Fold the analysis turn's own cost into whatever gets recorded, so it
   // still counts against the daily budget instead of being invisible spend.
   if (outcome.kind === "closed" || outcome.kind === "needs_human") {
@@ -212,7 +239,15 @@ export function cancelPending(): Proposal | null {
   if (!pending) return null;
   clearPendingApproval();
   declinedKeys.add(pending.issueKey);
-  return { issueKey: pending.issueKey, title: pending.title, repo: pending.repo, descriptionShort: pending.descriptionShort, plan: pending.plan, costUsd: pending.costUsd };
+  return {
+    issueKey: pending.issueKey,
+    title: pending.title,
+    repo: pending.repo,
+    descriptionShort: pending.descriptionShort,
+    plan: pending.plan,
+    acceptanceCriteria: pending.acceptanceCriteria,
+    costUsd: pending.costUsd,
+  };
 }
 
 function checkDailyCaps(): { kind: "paused"; reason: string } | null {
@@ -229,10 +264,16 @@ function checkDailyCaps(): { kind: "paused"; reason: string } | null {
   return null;
 }
 
-// Shared by the auto-picked (runQueueOnce) and manually-picked (runTicketByKey,
-// from a dashboard click) paths — both route, budget-check, and dispatch the
-// same way; they only differ in how the issue was selected.
-async function dispatchIssue(jira: JiraClient, issue: JiraIssue): Promise<QueueRunOutcome> {
+// Shared by the auto-picked (runQueueOnce), manually-picked (runTicketByKey, from a
+// dashboard click), and proposed-and-approved (confirmPending) paths — all route,
+// budget-check, and dispatch the same way; they only differ in how the issue was
+// selected and whether a human-approved contract already exists for it.
+//
+// acceptanceCriteria defaults to [] for the two paths that skip propose/approve
+// entirely (no human has reviewed a contract for them) — confirmPending is the only
+// caller that ever passes a non-empty list, and it's frozen at that point: nothing
+// after this regenerates or edits it, the close loop only ever reads it for context.
+async function dispatchIssue(jira: JiraClient, issue: JiraIssue, acceptanceCriteria: string[] = []): Promise<QueueRunOutcome> {
   if (getLiveState().currentJob) {
     return { kind: "busy", issueKey: issue.key };
   }
@@ -260,7 +301,7 @@ async function dispatchIssue(jira: JiraClient, issue: JiraIssue): Promise<QueueR
     throw new Error(`Repo path for "${detection.kind}" is not configured (set ${detection.kind.toUpperCase()}_REPO_PATH)`);
   }
 
-  const task = toTaskSpec(issue);
+  const task: TaskSpec = { ...toTaskSpec(issue), acceptanceCriteria };
   const branchName = `harness/${issue.key.toLowerCase()}`;
 
   startJob(issue.key, issue.summary, issue.description, detection.kind, config.maxIterations);

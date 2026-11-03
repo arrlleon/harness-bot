@@ -38,6 +38,11 @@ export interface PendingApproval {
   description: string; // full, for dispatch
   descriptionShort: string; // truncated, for display
   plan: string;
+  // Fixed here, at propose time, and never regenerated or edited afterward — the
+  // close loop (implement) only ever reads these for prompt context, it has no path
+  // to change them. The human approves (or rejects) exactly this list before any
+  // code gets written, same spirit as Avengers Harness's frozen-acceptance-tests idea.
+  acceptanceCriteria: string[];
   costUsd: number;
 }
 

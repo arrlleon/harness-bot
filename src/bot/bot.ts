@@ -92,12 +92,23 @@ function formatProposal(p: Proposal): string {
     `💸 анализ стоил $${escapeMarkdownV2(p.costUsd.toFixed(4))}`,
   ].join("\n");
 
+  // Shown here so approval is a real review of the contract, not a rubber stamp on
+  // the plan alone — these criteria are what actually gets frozen into the task once
+  // you tap Подтвердить (see PendingApproval.acceptanceCriteria).
+  const criteriaLines =
+    p.acceptanceCriteria.length > 0
+      ? p.acceptanceCriteria.map((c) => `• ${escapeMarkdownV2(c)}`)
+      : ["(модель не сформулировала критерии — будет зафиксирован только план)"];
+
   const bodyLines = [
     "📋 Описание:",
     ...escapeMarkdownV2(p.descriptionShort || "(нет описания)").split("\n"),
     "",
     "💡 Предлагаемое решение:",
     ...escapeMarkdownV2(p.plan || "(нет плана)").split("\n"),
+    "",
+    "✅ Критерии приёмки (зафиксируются при подтверждении):",
+    ...criteriaLines,
   ];
 
   return [header, "", expandableBlockquote(bodyLines)].join("\n");
