@@ -11,6 +11,14 @@ export interface RepoConfig {
   path: string;
   gates: GateSpec[];
   gitlabProjectPath: string;
+  // How to run exactly one acceptance-test file, and what extension this repo's test
+  // runner discovers (jest: .spec.ts via testRegex; vitest: .test.ts via `include`).
+  // Deliberately `npx <runner>` rather than the repo's own `yarn test` script —
+  // reproduced live: a plain `yarn test` run on front-ai silently rewrote
+  // package.json's packageManager field as a side effect, which would otherwise leak
+  // into the task's own commit on every gate run. `npx` sidesteps yarn entirely.
+  acceptanceRunner: string;
+  acceptanceTestExt: string;
 }
 
 // typecheck/lint run before test (cheap, fast signal first) and build runs last
@@ -52,11 +60,15 @@ export const config = {
       path: process.env.BACKEND_REPO_PATH ?? "",
       gates: buildGates("BACKEND", "yarn test"),
       gitlabProjectPath: process.env.BACKEND_GITLAB_PROJECT ?? "saqr/back-ai",
+      acceptanceRunner: process.env.BACKEND_ACCEPTANCE_RUNNER ?? "npx jest",
+      acceptanceTestExt: process.env.BACKEND_ACCEPTANCE_TEST_EXT ?? "spec.ts",
     },
     frontend: {
       path: process.env.FRONTEND_REPO_PATH ?? "",
       gates: buildGates("FRONTEND", "yarn test"),
       gitlabProjectPath: process.env.FRONTEND_GITLAB_PROJECT ?? "saqr/front-ai",
+      acceptanceRunner: process.env.FRONTEND_ACCEPTANCE_RUNNER ?? "npx vitest run",
+      acceptanceTestExt: process.env.FRONTEND_ACCEPTANCE_TEST_EXT ?? "test.ts",
     },
   } satisfies Record<string, RepoConfig>,
   // No role here used an explicit --model before — every turn silently inherited
@@ -70,7 +82,16 @@ export const config = {
     chat: process.env.CHAT_MODEL ?? "claude-haiku-4-5-20251001",
     propose: process.env.PROPOSE_MODEL ?? "claude-sonnet-5",
     implement: process.env.IMPLEMENT_MODEL ?? "claude-opus-5",
+    // Writing a good acceptance test needs real codebase understanding (test-module
+    // setup, mocking conventions) but is a single, bounded turn, not an open-ended
+    // multi-iteration loop — Sonnet, same weight class as propose.
+    acceptance: process.env.ACCEPTANCE_MODEL ?? "claude-sonnet-5",
   },
+  // On by default — this is the whole point of freezing acceptance criteria at
+  // propose time. Kept as a single kill switch (not per-repo) so it can be turned
+  // off instantly without a redeploy if the extra turn's cost/time ever becomes a
+  // problem, without touching the gate/model config above it.
+  acceptanceTestsEnabled: (process.env.ACCEPTANCE_TESTS_ENABLED ?? "true") !== "false",
   maxIterations: Number(process.env.MAX_ITERATIONS ?? 5),
   maxBudgetUsd: Number(process.env.MAX_BUDGET_USD ?? 5),
   dailyBudgetUsd: Number(process.env.DAILY_BUDGET_USD ?? 20),

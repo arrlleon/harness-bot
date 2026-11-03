@@ -8,6 +8,11 @@ export interface TaskSpec {
 export interface GateSpec {
   name: string;
   command: string;
+  // Baseline-relative gates (typecheck/lint/test/build) pass if they're no worse than
+  // before the agent's edit — correct for pre-existing repo noise, but wrong for an
+  // acceptance test: it's brand new, there is no "before" to tolerate, it must
+  // actually pass. A strict gate ignores its baseline and requires exit 0 outright.
+  strict?: boolean;
 }
 
 export interface GateBaseline {
@@ -33,7 +38,16 @@ export interface EngineConfig {
   permissionMode: string;
   model?: string;
   extraDeniedPaths?: string[];
-  onIteration?: (info: { iteration: number; phase: "baseline" | "iterating" | "verifying"; costUsd: number; summary: string }) => void;
+  // Present only when the task has frozen acceptance criteria to turn into an
+  // executable gate. Absent (e.g. non-reviewed dispatch paths) means no acceptance
+  // test is written and the loop behaves exactly as it did before this existed.
+  acceptanceTest?: { model: string; runner: string; ext: string };
+  onIteration?: (info: {
+    iteration: number;
+    phase: "baseline" | "writing_acceptance_test" | "iterating" | "verifying";
+    costUsd: number;
+    summary: string;
+  }) => void;
   onLog?: (line: string) => void;
 }
 
@@ -79,4 +93,8 @@ export interface CloseLoopResult {
   totalCostUsd: number;
   stopReason: "verified" | "max_iterations" | "max_budget" | "agent_error";
   worktreeDir: string;
+  // Set when an acceptance test was successfully written and frozen into the loop as
+  // a gate; absent if none was requested, or the write attempt failed (see onLog for
+  // why — the loop still proceeds without it rather than failing the whole task).
+  acceptanceTestPath?: string;
 }

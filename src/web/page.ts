@@ -116,6 +116,7 @@ try {
 
 var PHASE_RU = {
   transitioning: "перевод статуса в Jira",
+  writing_acceptance_test: "пишу тест приёмки по критериям",
   baseline: "считаю baseline (сколько тестов падает и без фикса)",
   iterating: "работа над кодом",
   verifying: "проверка (тесты)",

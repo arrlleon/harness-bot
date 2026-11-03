@@ -82,7 +82,10 @@ export async function runGates(cwd: string, gates: GateSpec[], baselines: GateBa
   for (const gate of gates) {
     const baseline = baselines.find((b) => b.name === gate.name);
     const { exitedZero, output } = await runRaw(cwd, gate.command);
-    const passed = baseline ? compareGate(gate, baseline, exitedZero, output) : exitedZero;
+    // Strict gates never consult their baseline — a brand-new acceptance test failing
+    // at baseline (no fix exists yet) is expected, not a pre-existing condition to
+    // tolerate; it must actually pass now, "no worse than before" isn't good enough.
+    const passed = gate.strict ? exitedZero : baseline ? compareGate(gate, baseline, exitedZero, output) : exitedZero;
     results.push({ name: gate.name, command: gate.command, passed, output });
   }
   const passed = results.every((r) => r.passed);

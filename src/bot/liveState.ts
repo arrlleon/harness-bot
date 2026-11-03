@@ -8,6 +8,7 @@ export const HARNESS_STATE_DIR = process.env.HARNESS_STATE_DIR ?? fileURLToPath(
 
 export type JobPhase =
   | "transitioning"
+  | "writing_acceptance_test"
   | "baseline"
   | "iterating"
   | "verifying"

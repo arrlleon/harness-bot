@@ -343,7 +343,7 @@ export async function runTicketByKey(issueKey: string): Promise<QueueRunOutcome>
 async function runJob(
   jira: JiraClient,
   issue: { key: string; summary: string },
-  repo: { path: string; gates: GateSpec[]; gitlabProjectPath: string },
+  repo: { path: string; gates: GateSpec[]; gitlabProjectPath: string; acceptanceRunner: string; acceptanceTestExt: string },
   task: ReturnType<typeof toTaskSpec>,
   branchName: string,
 ): Promise<QueueRunOutcome> {
@@ -366,6 +366,9 @@ async function runJob(
       maxBudgetUsd: config.maxBudgetUsd,
       permissionMode: "acceptEdits",
       model: config.models.implement,
+      acceptanceTest: config.acceptanceTestsEnabled
+        ? { model: config.models.acceptance, runner: repo.acceptanceRunner, ext: repo.acceptanceTestExt }
+        : undefined,
       onIteration: ({ iteration, phase, costUsd, summary }) => {
         updateJob({ iteration, phase, costUsd, lastTurnSummary: summary });
         writeCheckpoint({

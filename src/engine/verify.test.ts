@@ -114,3 +114,22 @@ test("runGates runs every gate (doesn't stop at the first failure) and labels ea
   assert.match(result.output, /\[build\]/);
   assert.match(result.output, /build broke/);
 });
+
+test("strict gate (acceptance test) fails at baseline and must still fail if unchanged — no 'already broken' tolerance", async () => {
+  const gates: GateSpec[] = [{ name: "acceptance", command: "echo 'Tests: 1 failed' && exit 1", strict: true }];
+  const baselines = await establishBaselines(".", gates);
+
+  // Same failing command run again, completely unchanged — a baseline-relative gate
+  // would call this "no worse than before" and pass; a strict gate must not.
+  const stillFailing = await runGates(".", gates, baselines);
+  assert.equal(stillFailing.passed, false);
+});
+
+test("strict gate passes once it actually exits 0, regardless of a failing baseline", async () => {
+  const baselineGates: GateSpec[] = [{ name: "acceptance", command: "exit 1", strict: true }];
+  const baselines = await establishBaselines(".", baselineGates);
+
+  const fixedGates: GateSpec[] = [{ name: "acceptance", command: "exit 0", strict: true }];
+  const result = await runGates(".", fixedGates, baselines);
+  assert.equal(result.passed, true);
+});
