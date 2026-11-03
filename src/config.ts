@@ -86,12 +86,19 @@ export const config = {
     // setup, mocking conventions) but is a single, bounded turn, not an open-ended
     // multi-iteration loop — Sonnet, same weight class as propose.
     acceptance: process.env.ACCEPTANCE_MODEL ?? "claude-sonnet-5",
+    // Deciding whether something is durable-fact-worthy and merging it cleanly into
+    // an existing notes file needs real judgment (avoid noise/dupes) but is one
+    // read-only turn per successful task, not a loop — Sonnet, same tier as propose.
+    memory: process.env.MEMORY_MODEL ?? "claude-sonnet-5",
   },
   // On by default — this is the whole point of freezing acceptance criteria at
   // propose time. Kept as a single kill switch (not per-repo) so it can be turned
   // off instantly without a redeploy if the extra turn's cost/time ever becomes a
   // problem, without touching the gate/model config above it.
   acceptanceTestsEnabled: (process.env.ACCEPTANCE_TESTS_ENABLED ?? "true") !== "false",
+  // Same shape: on by default, one kill switch. Adds one extra read-only turn per
+  // *successful* task (not per iteration) — cheap relative to propose/acceptance.
+  memoryEnabled: (process.env.MEMORY_ENABLED ?? "true") !== "false",
   maxIterations: Number(process.env.MAX_ITERATIONS ?? 5),
   maxBudgetUsd: Number(process.env.MAX_BUDGET_USD ?? 5),
   dailyBudgetUsd: Number(process.env.DAILY_BUDGET_USD ?? 20),

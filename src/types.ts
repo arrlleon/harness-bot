@@ -42,9 +42,12 @@ export interface EngineConfig {
   // executable gate. Absent (e.g. non-reviewed dispatch paths) means no acceptance
   // test is written and the loop behaves exactly as it did before this existed.
   acceptanceTest?: { model: string; runner: string; ext: string };
+  // Absent disables the whole memory layer (no read injected into prompts, no write
+  // attempted on success) — same opt-out shape as acceptanceTest.
+  memory?: { model: string; baseBranch: string };
   onIteration?: (info: {
     iteration: number;
-    phase: "baseline" | "writing_acceptance_test" | "iterating" | "verifying";
+    phase: "baseline" | "writing_acceptance_test" | "iterating" | "verifying" | "updating_memory";
     costUsd: number;
     summary: string;
   }) => void;
@@ -97,4 +100,7 @@ export interface CloseLoopResult {
   // a gate; absent if none was requested, or the write attempt failed (see onLog for
   // why — the loop still proceeds without it rather than failing the whole task).
   acceptanceTestPath?: string;
+  // True only if the memory turn judged something durable happened and actually wrote
+  // a commit for it — most successful tasks won't have anything worth recording.
+  memoryUpdated?: boolean;
 }

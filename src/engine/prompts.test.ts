@@ -18,6 +18,15 @@ test("buildInitialPrompt includes task id, title, description, and numbered crit
   assert.match(prompt, /2\. No regressions/);
 });
 
+test("buildInitialPrompt includes memory context when given, and omits it when not", () => {
+  const task: TaskSpec = { id: "XEN-42", title: "Fix the thing", description: "It is broken.", acceptanceCriteria: [] };
+  const withMemory = buildInitialPrompt(task, "Накопленные заметки jira-harness: сервис X отвечает 30с");
+  assert.match(withMemory, /отвечает 30с/);
+
+  const withoutMemory = buildInitialPrompt(task);
+  assert.doesNotMatch(withoutMemory, /Накопленные заметки/);
+});
+
 test("buildFeedbackPrompt reports each failing gate in its own labeled section", () => {
   const failed: GateResult[] = [
     { name: "typecheck", command: "tsc --noEmit", passed: false, output: "src/x.ts: error TS2322" },

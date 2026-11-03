@@ -4,6 +4,7 @@ import { establishBaselines, runGates } from "./verify.js";
 import { buildFeedbackPrompt, buildInitialPrompt } from "./prompts.js";
 import { createWorktree, commitAll } from "./git.js";
 import { writeAcceptanceTest } from "./acceptanceTest.js";
+import { readMemoryFiles, buildMemoryContextBlock, updateProjectMemory } from "./memory.js";
 
 export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promise<CloseLoopResult> {
   const worktreeDir = await createWorktree(config.repoPath, config.branchName);
@@ -47,8 +48,13 @@ export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promis
   config.onIteration?.({ iteration: 0, phase: "baseline", costUsd: totalCostUsd, summary: `Считаю baseline по гейтам: ${gateNames}` });
   const baselines = await establishBaselines(worktreeDir, gates);
 
+  // Read-only context, injected directly rather than left for the agent to stumble
+  // onto — the project's own CLAUDE.md only auto-loads AGENTS.md, not memory files.
+  const memories = await readMemoryFiles(config.repoPath);
+  const memoryContext = buildMemoryContextBlock(memories);
+
   const iterations: CloseLoopIteration[] = [];
-  let prompt = buildInitialPrompt(task);
+  let prompt = buildInitialPrompt(task, memoryContext);
   let resumeSessionId: string | undefined;
 
   for (let i = 0; i < config.maxIterations; i++) {
@@ -82,7 +88,17 @@ export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promis
 
     if (verify.passed) {
       await commitAll(worktreeDir, `${task.id}: ${task.title}\n\nAutomated by jira-harness.`);
-      return { task, success: true, iterations, totalCostUsd, stopReason: "verified", worktreeDir, acceptanceTestPath };
+
+      let memoryUpdated = false;
+      if (config.memory) {
+        config.onIteration?.({ iteration: i + 1, phase: "updating_memory", costUsd: totalCostUsd, summary: "Обновляю project memory" });
+        const memResult = await updateProjectMemory(worktreeDir, task, config.memory);
+        totalCostUsd += memResult.costUsd;
+        memoryUpdated = memResult.updated;
+        if (memResult.reason) config.onLog?.(`⚠️ Не удалось обновить project memory (${memResult.reason})`);
+      }
+
+      return { task, success: true, iterations, totalCostUsd, stopReason: "verified", worktreeDir, acceptanceTestPath, memoryUpdated };
     }
 
     prompt = buildFeedbackPrompt(verify.gates.filter((g) => !g.passed));

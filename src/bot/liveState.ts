@@ -12,6 +12,7 @@ export type JobPhase =
   | "baseline"
   | "iterating"
   | "verifying"
+  | "updating_memory"
   | "pushing"
   | "opening_mr"
   | "commenting";

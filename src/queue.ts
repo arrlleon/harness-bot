@@ -4,6 +4,7 @@ import { detectRepo, toTaskSpec, type RepoDetection } from "./jira/mapToTask.js"
 import { runCloseLoop } from "./engine/loop.js";
 import { runClaudeTurn } from "./engine/claudeEngine.js";
 import { parseProposalResponse } from "./engine/proposal.js";
+import { readMemoryFiles, buildMemoryContextBlock } from "./engine/memory.js";
 import { createMergeRequest, pushBranch } from "./gitlab.js";
 import {
   startJob,
@@ -97,11 +98,12 @@ const declinedKeys = new Set<string>();
 // way Avengers Harness's frozen-acceptance-tests idea does, just without a separate
 // executable-test layer.
 async function proposeSolution(task: TaskSpec, repoPath: string): Promise<{ plan: string; acceptanceCriteria: string[]; costUsd: number }> {
+  const memoryContext = buildMemoryContextBlock(await readMemoryFiles(repoPath));
   const prompt = [
     `Задача ${task.id}: ${task.title}`,
     "",
     task.description,
-    "",
+    memoryContext ? `\n${memoryContext}\n` : "",
     "Не редактируй и не создавай файлы — только изучи код (Read/Grep/Glob).",
     "Ответь строго в этом формате, на русском:",
     "",
@@ -369,6 +371,7 @@ async function runJob(
       acceptanceTest: config.acceptanceTestsEnabled
         ? { model: config.models.acceptance, runner: repo.acceptanceRunner, ext: repo.acceptanceTestExt }
         : undefined,
+      memory: config.memoryEnabled ? { model: config.models.memory, baseBranch: config.gitlab.targetBranch } : undefined,
       onIteration: ({ iteration, phase, costUsd, summary }) => {
         updateJob({ iteration, phase, costUsd, lastTurnSummary: summary });
         writeCheckpoint({

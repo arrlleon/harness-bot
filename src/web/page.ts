@@ -120,6 +120,7 @@ var PHASE_RU = {
   baseline: "считаю baseline (сколько тестов падает и без фикса)",
   iterating: "работа над кодом",
   verifying: "проверка (тесты)",
+  updating_memory: "обновляю project memory",
   pushing: "отправка ветки в репозиторий",
   opening_mr: "открытие MR",
   commenting: "комментирование тикета",
