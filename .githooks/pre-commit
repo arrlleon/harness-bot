@@ -1,0 +1,15 @@
+#!/bin/sh
+# Mechanical gate, not a reminder: the test suite must stay green before anything
+# lands. Mirrors the harness's own "gates matter more than reviewers" principle —
+# this check doesn't trust anyone to remember to run tests, it just runs them.
+set -e
+
+# git sets GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE (etc.) for its own commit operation —
+# inherited by any `git` child process spawned from here, which breaks git.test.ts's
+# own throwaway repos (reproduced live: "index file open failed: Not a directory",
+# only inside this hook, never when running `npm test` directly). Strip them before
+# running tests so git commands inside the test suite see a clean environment.
+for v in $(env | grep '^GIT_' | cut -d= -f1); do unset "$v"; done
+
+echo "[pre-commit] running test suite..."
+npm test --silent

@@ -1,0 +1,27 @@
+#!/bin/sh
+# Enforces "new features ship with tests" mechanically, not as a convention someone
+# has to remember. A commit that touches engine/bot/jira source logic without also
+# touching a *.test.ts file is blocked — unless the message explicitly says why not,
+# via a `No-Test: <reason>` trailer. That's the conscious escape hatch for commits
+# that genuinely don't need one (docs, config, pure wiring) without silently making
+# `git commit --no-verify` the normal way to skip this.
+MSG_FILE="$1"
+
+STAGED=$(git diff --cached --name-only --diff-filter=ACM)
+SRC_CHANGED=$(printf '%s\n' "$STAGED" | grep -E '^src/.*\.ts$' | grep -v '\.test\.ts$' || true)
+TEST_CHANGED=$(printf '%s\n' "$STAGED" | grep -E '^src/.*\.test\.ts$' || true)
+
+if [ -n "$SRC_CHANGED" ] && [ -z "$TEST_CHANGED" ]; then
+  if ! grep -qi '^No-Test:' "$MSG_FILE"; then
+    echo ""
+    echo "[commit-msg] BLOCKED: source changed but no *.test.ts touched in this commit:"
+    printf '%s\n' "$SRC_CHANGED" | sed 's/^/    /'
+    echo ""
+    echo "Add a test for the new/changed behavior, or if this one genuinely doesn't"
+    echo "need one (docs, config, pure wiring with no new logic), add a line to the"
+    echo "commit message explaining why:"
+    echo "    No-Test: <reason>"
+    echo ""
+    exit 1
+  fi
+fi
