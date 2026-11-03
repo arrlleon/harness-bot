@@ -127,7 +127,7 @@ var PHASE_RU = {
   commenting: "комментирование тикета",
 };
 var OUTCOME_RU = { closed: "закрыт", needs_human: "нужен человек", skipped: "пропущен" };
-var REPO_RU = { backend: "бэкенд", frontend: "фронтенд", ambiguous: "неоднозначно", unknown: "не определено" };
+var REPO_RU = { backend: "бэкенд", frontend: "фронтенд", cross: "кросс-репо", ambiguous: "кросс-репо", unknown: "не определено" };
 
 function fmtElapsed(iso) {
   const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
@@ -215,7 +215,7 @@ async function loadTickets() {
       return;
     }
     container.innerHTML = tickets.map(function (t) {
-      const routable = t.repo === "backend" || t.repo === "frontend";
+      const routable = t.repo === "backend" || t.repo === "frontend" || t.repo === "ambiguous";
       const tagClass = routable ? "" : " route-" + t.repo;
       return '<div class="ticket-row">' +
         '<div class="ticket-main">' +

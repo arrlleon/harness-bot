@@ -10,7 +10,7 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/cli.ts",
     "start": "node dist/cli.js",
-    "test": "node --import tsx --test --test-concurrency=1 src/**/*.test.ts"
+    "test": "node --import tsx --test --test-concurrency=1 src/*.test.ts src/**/*.test.ts"
   },
   "dependencies": {
     "commander": "^12.1.0",

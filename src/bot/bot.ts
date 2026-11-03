@@ -19,7 +19,7 @@ import {
 import { killCurrentTurn, runClaudeTurn } from "../engine/claudeEngine.js";
 import type { QueueRunOutcome } from "../types.js";
 
-const REPO_RU: Record<string, string> = { backend: "бэкенд", frontend: "фронтенд" };
+const REPO_RU: Record<string, string> = { backend: "бэкенд", frontend: "фронтенд", cross: "кросс-репо (бэкенд → фронтенд)" };
 
 function statusTag(status: string | undefined): string {
   if (status === config.jira.inProgressStatus) return "[IN WORK]";
@@ -359,7 +359,7 @@ export async function startBot(): Promise<void> {
         detection.kind === "backend" || detection.kind === "frontend"
           ? `репозиторий: ${REPO_RU[detection.kind]}`
           : detection.kind === "ambiguous"
-            ? "репозиторий: неоднозначно (backend+frontend) — будет пропущен"
+            ? `репозиторий: ${REPO_RU.cross} — сначала бэкенд, потом фронтенд с его контекстом`
             : "репозиторий: не определён (нет префикса) — будет пропущен";
       await ctx.reply(
         [`${issue.key}: ${issue.summary}`, repoLine, "", issue.description.slice(0, 1000)].join("\n"),

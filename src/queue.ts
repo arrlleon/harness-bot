@@ -139,6 +139,46 @@ async function proposeSolution(task: TaskSpec, repoPath: string): Promise<{ plan
   return { plan, acceptanceCriteria, costUsd: turn.totalCostUsd };
 }
 
+// Cross-repo tickets (tagged [backend]+[frontend]/[web]) get one proposeSolution turn
+// per repo instead of one combined turn — each only ever reads its own codebase, so
+// its own plan/criteria naturally come out scoped to what it can actually see, with no
+// need for the model to guess at a shared vocabulary across two unrelated repos. The
+// two plans/criteria lists are tagged with a "[backend]"/"[frontend]" prefix purely so
+// they can travel through the existing flat Proposal.plan/acceptanceCriteria fields
+// (shown to the human, then frozen verbatim on approval) and be split back apart by
+// splitCrossRepoCriteria() at dispatch time — avoids a parallel set of cross-repo-only
+// types for PendingApproval/Proposal.
+async function proposeCrossRepoSolution(
+  task: TaskSpec,
+): Promise<{ plan: string; acceptanceCriteria: string[]; costUsd: number }> {
+  const [backend, frontend] = await Promise.all([
+    proposeSolution(task, config.repos.backend.path),
+    proposeSolution(task, config.repos.frontend.path),
+  ]);
+  return {
+    plan: `[backend]\n${backend.plan}\n\n[frontend]\n${frontend.plan}`,
+    acceptanceCriteria: [
+      ...backend.acceptanceCriteria.map((c) => `[backend] ${c}`),
+      ...frontend.acceptanceCriteria.map((c) => `[frontend] ${c}`),
+    ],
+    costUsd: backend.costUsd + frontend.costUsd,
+  };
+}
+
+// Reverses the tagging proposeCrossRepoSolution applied — an untagged criterion (should
+// never happen coming out of that function, but a human can in principle hand-edit
+// nothing here since approval is a single yes/no, not a text edit) is dropped rather
+// than guessed into either side.
+export function splitCrossRepoCriteria(criteria: string[]): { backend: string[]; frontend: string[] } {
+  const backend: string[] = [];
+  const frontend: string[] = [];
+  for (const c of criteria) {
+    if (c.startsWith("[backend] ")) backend.push(c.slice("[backend] ".length));
+    else if (c.startsWith("[frontend] ")) frontend.push(c.slice("[frontend] ".length));
+  }
+  return { backend, frontend };
+}
+
 // Shared by proposeNext (auto-picked, whatever's top of the JQL order) and
 // proposeIssueByKey (manually picked from /start's ticket menu).
 async function proposeIssue(
@@ -147,17 +187,55 @@ async function proposeIssue(
   onAnalyzing?: (issueKey: string) => void | Promise<void>,
 ): Promise<ProposeOutcome> {
   const detection = detectRepo(issue);
-  if (detection.kind === "unknown" || detection.kind === "ambiguous") {
-    const reason =
-      detection.kind === "unknown"
-        ? "no [backend]/[frontend]/[web] prefix in title or description"
-        : "touches both backend and frontend";
+  if (detection.kind === "unknown") {
+    const reason = "no [backend]/[frontend]/[web] prefix in title or description";
     declinedKeys.add(issue.key); // can't route it regardless of approval; no point re-surfacing
     await jira.addComment(
       issue.key,
       `jira-harness: could not determine a single target repository (${reason}). Skipped — left in To Do.`,
     );
     return { kind: "skipped", issueKey: issue.key, reason };
+  }
+
+  if (detection.kind === "ambiguous") {
+    if (!config.repos.backend.path || !config.repos.frontend.path) {
+      const reason = "cross-repo ticket but BACKEND_REPO_PATH/FRONTEND_REPO_PATH aren't both configured";
+      declinedKeys.add(issue.key);
+      await jira.addComment(issue.key, `jira-harness: ${reason}. Skipped — left in To Do.`);
+      return { kind: "skipped", issueKey: issue.key, reason };
+    }
+
+    await onAnalyzing?.(issue.key);
+
+    const task = toTaskSpec(issue);
+    const { plan, acceptanceCriteria, costUsd } = await proposeCrossRepoSolution(task);
+    const costEstimate = estimateCost(loadState(), "cross");
+
+    setPendingApproval({
+      issueKey: issue.key,
+      title: issue.summary,
+      repo: "cross",
+      description: issue.description,
+      descriptionShort: issue.description.slice(0, 300),
+      plan,
+      acceptanceCriteria,
+      costUsd,
+      costEstimate,
+    });
+
+    return {
+      kind: "proposed",
+      proposal: {
+        issueKey: issue.key,
+        title: issue.summary,
+        repo: "cross",
+        descriptionShort: issue.description.slice(0, 300),
+        plan,
+        acceptanceCriteria,
+        costUsd,
+        costEstimate,
+      },
+    };
   }
 
   const repo = config.repos[detection.kind];
@@ -306,12 +384,36 @@ async function dispatchIssue(jira: JiraClient, issue: JiraIssue, acceptanceCrite
     return { kind: "skipped", issueKey: issue.key, reason };
   }
   if (detection.kind === "ambiguous") {
-    const reason = "touches both backend and frontend";
-    await jira.addComment(
-      issue.key,
-      "jira-harness: this ticket's prefix spans both backend and frontend. Cross-repo changes aren't automated yet — needs a human to split or drive it. Left in To Do.",
-    );
-    return { kind: "skipped", issueKey: issue.key, reason };
+    const backendRepo = config.repos.backend;
+    const frontendRepo = config.repos.frontend;
+    if (!backendRepo.path || !frontendRepo.path) {
+      const reason = "cross-repo ticket but BACKEND_REPO_PATH/FRONTEND_REPO_PATH aren't both configured";
+      await jira.addComment(issue.key, `jira-harness: ${reason}. Left in To Do.`);
+      return { kind: "skipped", issueKey: issue.key, reason };
+    }
+
+    const { backend: backendCriteria, frontend: frontendCriteria } = splitCrossRepoCriteria(acceptanceCriteria);
+    const backendTask: TaskSpec = { ...toTaskSpec(issue), acceptanceCriteria: backendCriteria };
+    const frontendTask: TaskSpec = { ...toTaskSpec(issue), acceptanceCriteria: frontendCriteria };
+    const backendBranch = `harness/${issue.key.toLowerCase()}-backend`;
+    const frontendBranch = `harness/${issue.key.toLowerCase()}-frontend`;
+
+    startJob(issue.key, issue.summary, issue.description, "cross", config.maxIterations);
+    const crossStartedAt = Date.now();
+    try {
+      const outcome = await runCrossRepoJob(
+        jira,
+        issue,
+        { task: backendTask, repo: backendRepo, branchName: backendBranch },
+        { task: frontendTask, repo: frontendRepo, branchName: frontendBranch },
+      );
+      if (outcome.kind === "closed" || outcome.kind === "needs_human") {
+        return { ...outcome, durationMs: Date.now() - crossStartedAt, repo: "cross" };
+      }
+      return outcome;
+    } finally {
+      finishJob();
+    }
   }
 
   const repo = config.repos[detection.kind];
@@ -366,16 +468,29 @@ export async function runTicketByKey(issueKey: string): Promise<QueueRunOutcome>
   return dispatchIssue(jira, issue);
 }
 
-async function runJob(
-  jira: JiraClient,
-  issue: { key: string; summary: string },
-  repo: { path: string; gates: GateSpec[]; gitlabProjectPath: string; acceptanceRunner: string; acceptanceTestExt: string },
-  task: ReturnType<typeof toTaskSpec>,
-  branchName: string,
-): Promise<JobOutcome> {
-  updateJob({ phase: "transitioning" });
-  await jira.transitionTo(issue.key, config.jira.inProgressStatus);
+type RepoHandle = { path: string; gates: GateSpec[]; gitlabProjectPath: string; acceptanceRunner: string; acceptanceTestExt: string };
 
+type CloseAndPushFailureKind = "loop" | "no_token" | "push";
+
+interface CloseLoopAndPushOutcome {
+  closeLoopResult: CloseLoopResult;
+  mrUrl?: string;
+  failureReason?: string;
+  failureKind?: CloseAndPushFailureKind;
+}
+
+// The actual "do the work" step, shared by the single-repo (runJob) and cross-repo
+// (runCrossRepoJob) dispatch paths. Deliberately does none of the Jira
+// commenting/status-transition side effects — a single-repo task and a cross-repo
+// task need different comments/transitions around this same core step (one comment
+// immediately vs. one combined comment only once both halves are known), so folding
+// them in here would just mean every caller immediately undoing half of them.
+async function closeLoopAndPush(
+  issue: { key: string; summary: string },
+  repo: RepoHandle,
+  task: TaskSpec,
+  branchName: string,
+): Promise<CloseLoopAndPushOutcome> {
   // Checkpoint is bookkeeping, not a resume mechanism: if this process dies mid-loop
   // (OOM-kill etc.), the worktree on disk already has whatever the agent last wrote —
   // the checkpoint just means a restart can find it and hand it to a human instead of
@@ -429,47 +544,11 @@ async function runJob(
       const blocking = result.reviewFindings.filter((f) => f.blocking);
       reason = `review_blocked: ${blocking.map((f) => f.description).join("; ")}`;
     }
-    await jira.addComment(
-      issue.key,
-      [
-        `jira-harness did not close this task: ${reason}`,
-        `cost: $${result.totalCostUsd.toFixed(4)}, iterations: ${result.iterations.length}`,
-        `worktree left at: ${result.worktreeDir}`,
-        "Left in-progress for a human to look at.",
-      ].join("\n"),
-    );
-    setPendingHumanReview({
-      issueKey: issue.key,
-      title: issue.summary,
-      reason,
-      costUsd: result.totalCostUsd,
-      worktreeDir: result.worktreeDir,
-      branchName,
-      gitlabProjectPath: repo.gitlabProjectPath,
-    });
-    return { kind: "needs_human", issueKey: issue.key, costUsd: result.totalCostUsd, reason, worktreeDir: result.worktreeDir, branchName };
+    return { closeLoopResult: result, failureReason: reason, failureKind: "loop" };
   }
 
   if (!config.gitlab.token) {
-    await jira.addComment(
-      issue.key,
-      [
-        `jira-harness implemented and verified this (cost: $${result.totalCostUsd.toFixed(4)}).`,
-        `Committed locally at ${result.worktreeDir} on branch ${branchName}, but GITLAB_TOKEN is not`,
-        "configured so no MR was opened. Left in-progress.",
-      ].join("\n"),
-    );
-    const reason = "no GITLAB_TOKEN configured";
-    setPendingHumanReview({
-      issueKey: issue.key,
-      title: issue.summary,
-      reason,
-      costUsd: result.totalCostUsd,
-      worktreeDir: result.worktreeDir,
-      branchName,
-      gitlabProjectPath: repo.gitlabProjectPath,
-    });
-    return { kind: "needs_human", issueKey: issue.key, costUsd: result.totalCostUsd, reason, worktreeDir: result.worktreeDir, branchName };
+    return { closeLoopResult: result, failureReason: "no GITLAB_TOKEN configured", failureKind: "no_token" };
   }
 
   try {
@@ -491,27 +570,190 @@ async function runJob(
       title: `${issue.key}: ${issue.summary}`,
       description: `Automated by jira-harness for ${issue.key}.\n\ncost: $${result.totalCostUsd.toFixed(4)}, iterations: ${result.iterations.length}${reviewNote}`,
     });
-    updateJob({ phase: "commenting" });
-    await jira.addComment(issue.key, `jira-harness opened ${mr.webUrl} (cost: $${result.totalCostUsd.toFixed(4)})`);
-    await jira.transitionTo(issue.key, config.jira.reviewStatus);
-    return { kind: "closed", issueKey: issue.key, costUsd: result.totalCostUsd, mrUrl: mr.webUrl };
+    return { closeLoopResult: result, mrUrl: mr.webUrl };
   } catch (err) {
-    const reason = `push/MR failed: ${(err as Error).message}`;
-    await jira.addComment(
-      issue.key,
-      `jira-harness verified the fix but failed to push/open an MR: ${(err as Error).message}\nCommitted locally at ${result.worktreeDir} on branch ${branchName}. Left in-progress.`,
-    );
+    return { closeLoopResult: result, failureReason: `push/MR failed: ${(err as Error).message}`, failureKind: "push" };
+  }
+}
+
+async function runJob(
+  jira: JiraClient,
+  issue: { key: string; summary: string },
+  repo: RepoHandle,
+  task: TaskSpec,
+  branchName: string,
+): Promise<JobOutcome> {
+  updateJob({ phase: "transitioning" });
+  await jira.transitionTo(issue.key, config.jira.inProgressStatus);
+
+  const outcome = await closeLoopAndPush(issue, repo, task, branchName);
+  const result = outcome.closeLoopResult;
+
+  if (outcome.failureKind) {
+    const message =
+      outcome.failureKind === "no_token"
+        ? [
+            `jira-harness implemented and verified this (cost: $${result.totalCostUsd.toFixed(4)}).`,
+            `Committed locally at ${result.worktreeDir} on branch ${branchName}, but GITLAB_TOKEN is not`,
+            "configured so no MR was opened. Left in-progress.",
+          ].join("\n")
+        : outcome.failureKind === "push"
+          ? `jira-harness verified the fix but failed to push/open an MR (${outcome.failureReason}).\nCommitted locally at ${result.worktreeDir} on branch ${branchName}. Left in-progress.`
+          : [
+              `jira-harness did not close this task: ${outcome.failureReason}`,
+              `cost: $${result.totalCostUsd.toFixed(4)}, iterations: ${result.iterations.length}`,
+              `worktree left at: ${result.worktreeDir}`,
+              "Left in-progress for a human to look at.",
+            ].join("\n");
+    await jira.addComment(issue.key, message);
     setPendingHumanReview({
       issueKey: issue.key,
       title: issue.summary,
-      reason,
+      reason: outcome.failureReason!,
       costUsd: result.totalCostUsd,
       worktreeDir: result.worktreeDir,
       branchName,
       gitlabProjectPath: repo.gitlabProjectPath,
     });
-    return { kind: "needs_human", issueKey: issue.key, costUsd: result.totalCostUsd, reason, worktreeDir: result.worktreeDir, branchName };
+    return {
+      kind: "needs_human",
+      issueKey: issue.key,
+      costUsd: result.totalCostUsd,
+      reason: outcome.failureReason!,
+      worktreeDir: result.worktreeDir,
+      branchName,
+    };
   }
+
+  updateJob({ phase: "commenting" });
+  await jira.addComment(issue.key, `jira-harness opened ${outcome.mrUrl} (cost: $${result.totalCostUsd.toFixed(4)})`);
+  await jira.transitionTo(issue.key, config.jira.reviewStatus);
+  return { kind: "closed", issueKey: issue.key, costUsd: result.totalCostUsd, mrUrl: outcome.mrUrl! };
+}
+
+const MAX_CROSS_REPO_CONTEXT_DIFF_CHARS = 8000; // same weight class as review.ts's own diff cap
+
+// Backend-first, autonomous handoff: no human gate between the two halves (ambiguous
+// tickets already got one approval up front, same as any single-repo task — this is
+// the execution of that same approved plan, not a second decision point). If the
+// backend half doesn't make it, the frontend half is never attempted — there is
+// nothing real to build against yet, just the ticket text. If the backend half lands
+// but the frontend half doesn't, the backend MR is left standing on its own rather
+// than held hostage — it's independently correct and shouldn't wait on the frontend.
+async function runCrossRepoJob(
+  jira: JiraClient,
+  issue: { key: string; summary: string },
+  backend: { task: TaskSpec; repo: RepoHandle; branchName: string },
+  frontend: { task: TaskSpec; repo: RepoHandle; branchName: string },
+): Promise<JobOutcome> {
+  updateJob({ phase: "transitioning" });
+  await jira.transitionTo(issue.key, config.jira.inProgressStatus);
+
+  const backendOutcome = await closeLoopAndPush(issue, backend.repo, backend.task, backend.branchName);
+  const backendResult = backendOutcome.closeLoopResult;
+
+  if (backendOutcome.failureKind) {
+    const reason = `backend: ${backendOutcome.failureReason}`;
+    await jira.addComment(
+      issue.key,
+      [
+        `jira-harness (cross-repo): backend half did not close — ${backendOutcome.failureReason}`,
+        `cost so far: $${backendResult.totalCostUsd.toFixed(4)}`,
+        `backend worktree left at: ${backendResult.worktreeDir}`,
+        "Frontend half was not attempted — nothing real to build against yet. Left in-progress.",
+      ].join("\n"),
+    );
+    setPendingHumanReview({
+      issueKey: issue.key,
+      title: issue.summary,
+      reason,
+      costUsd: backendResult.totalCostUsd,
+      worktreeDir: backendResult.worktreeDir,
+      branchName: backend.branchName,
+      gitlabProjectPath: backend.repo.gitlabProjectPath,
+    });
+    return {
+      kind: "needs_human",
+      issueKey: issue.key,
+      costUsd: backendResult.totalCostUsd,
+      reason,
+      worktreeDir: backendResult.worktreeDir,
+      branchName: backend.branchName,
+    };
+  }
+
+  // Backend is pushed and its MR opened — hand the frontend turn the real diff instead
+  // of letting it guess the new API shape from the ticket text alone. Worktree still
+  // exists on disk (nothing removes it on a success path, single-repo or cross-repo).
+  const backendDiff = await getWorktreeDiff(backendResult.worktreeDir, config.gitlab.targetBranch);
+  const truncatedDiff =
+    backendDiff.length > MAX_CROSS_REPO_CONTEXT_DIFF_CHARS
+      ? backendDiff.slice(0, MAX_CROSS_REPO_CONTEXT_DIFF_CHARS) + "\n... (обрезано)"
+      : backendDiff;
+  const frontendTask: TaskSpec = {
+    ...frontend.task,
+    description: [
+      frontend.task.description,
+      "",
+      "--- Контекст: бэкенд-часть этой же задачи уже реализована и запушена, дальше реализуется только фронтенд ---",
+      `MR бэкенда: ${backendOutcome.mrUrl}`,
+      "Фактический дифф бэкенда (ориентируйся на реальный код, а не только на текст задачи):",
+      truncatedDiff,
+    ].join("\n"),
+  };
+
+  const frontendOutcome = await closeLoopAndPush(issue, frontend.repo, frontendTask, frontend.branchName);
+  const frontendResult = frontendOutcome.closeLoopResult;
+  const totalCostUsd = backendResult.totalCostUsd + frontendResult.totalCostUsd;
+
+  if (frontendOutcome.failureKind) {
+    const reason = `frontend: ${frontendOutcome.failureReason} (backend already opened: ${backendOutcome.mrUrl})`;
+    await jira.addComment(
+      issue.key,
+      [
+        `jira-harness (cross-repo): backend done — ${backendOutcome.mrUrl}`,
+        `frontend half did not close — ${frontendOutcome.failureReason}`,
+        `cost: $${totalCostUsd.toFixed(4)}`,
+        `frontend worktree left at: ${frontendResult.worktreeDir}`,
+        "Left in-progress for a human to look at the frontend half — the backend MR stands on its own and doesn't need to wait.",
+      ].join("\n"),
+    );
+    setPendingHumanReview({
+      issueKey: issue.key,
+      title: issue.summary,
+      reason,
+      costUsd: totalCostUsd,
+      worktreeDir: frontendResult.worktreeDir,
+      branchName: frontend.branchName,
+      gitlabProjectPath: frontend.repo.gitlabProjectPath,
+    });
+    return {
+      kind: "needs_human",
+      issueKey: issue.key,
+      costUsd: totalCostUsd,
+      reason,
+      worktreeDir: frontendResult.worktreeDir,
+      branchName: frontend.branchName,
+    };
+  }
+
+  updateJob({ phase: "commenting" });
+  await jira.addComment(
+    issue.key,
+    [
+      "jira-harness (cross-repo) closed both halves:",
+      `backend: ${backendOutcome.mrUrl}`,
+      `frontend: ${frontendOutcome.mrUrl}`,
+      `cost: $${totalCostUsd.toFixed(4)}`,
+    ].join("\n"),
+  );
+  await jira.transitionTo(issue.key, config.jira.reviewStatus);
+  return {
+    kind: "closed",
+    issueKey: issue.key,
+    costUsd: totalCostUsd,
+    mrUrl: `backend: ${backendOutcome.mrUrl}, frontend: ${frontendOutcome.mrUrl}`,
+  };
 }
 
 // The human looked at the diff a needs_human outcome left pending and decided.
