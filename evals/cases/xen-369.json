@@ -1,0 +1,13 @@
+{
+  "id": "XEN-369",
+  "title": "[back][SECURITY] GET /invites/company/:companyId без проверки компании отдаёт токены чужих приглашений",
+  "description": "Критично, есть на master (прод) и dev. Найдено по коду при планировании ORGCUT, живьём не воспроизводилось.\n\nЧто не так:\n- invites.controller.ts -> GET /invites/company/:companyId: только JwtAuthGuard; InvitesService.getByCompany(companyId) не проверяет ни принадлежность запрашивающего к компании, ни права. Глобально — только ThrottlerGuard.\n- Ответ содержит email / телефон приглашённых (ПДн) и token ждущих приглашений.\n- POST /invites/public/:token/accept (acceptAsUser) проверяет только существование, срок и «не принято» — не сверяет, что принимает тот, кого пригласили.\n\nПоследствие: любой вошедший пользователь может получить список приглашений чужой компании и, взяв токен ждущего приглашения, стать участником чужого тенанта с ролью из приглашения (вплоть до admin). Плюс утечка ПДн между тенантами.\n\nИсправить:\n1. GET /invites/company/:companyId — только для активной компании запрашивающего (companyId === activeCompanyId) и с правом org.people.manage (legacy: CEO/ADMIN).\n2. Не отдавать token в списке (фронт его из списка не использует — токен показывается только сразу после создания).\n3. acceptAsUser — сверять приглашённого с принимающим (email / телефон приглашения ↔ пользователь) или запретить принятие без совпадения.",
+  "repo": "backend",
+  "baseCommit": "c6a34f6162b54c98cdbe4d0157d19fdf540a566a",
+  "referenceCommit": "ce8d4febfe830c28a52908d4458383b20dcdb280",
+  "hiddenTestPaths": [
+    "src/modules/invites/invites.service.xen369.spec.ts",
+    "src/modules/users/users.service.merge-placeholder.spec.ts",
+    "src/modules/users/users.service.update-email.spec.ts"
+  ]
+}

@@ -8,7 +8,7 @@ import { readMemoryFiles, buildMemoryContextBlock, updateProjectMemory } from ".
 import { fingerprintFailure } from "./stuckDetector.js";
 
 export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promise<CloseLoopResult> {
-  const worktreeDir = await createWorktree(config.repoPath, config.branchName);
+  const worktreeDir = config.existingWorktreeDir ?? (await createWorktree(config.repoPath, config.branchName));
 
   let totalCostUsd = 0;
   let gates: GateSpec[] = config.gates;

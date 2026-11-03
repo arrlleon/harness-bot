@@ -10,7 +10,11 @@ export function worktreeDirFor(branchName: string): string {
   return join(tmpdir(), "jira-harness-worktrees", branchName);
 }
 
-export async function createWorktree(repoPath: string, branchName: string): Promise<string> {
+// startPoint lets evals/runCase.ts create a worktree at a specific historical commit
+// (the case's baseCommit) instead of the repo's current HEAD — everything else about
+// the worktree (symlinked node_modules, stale-registration recovery) works the same
+// either way. Omitted, this is the exact same call real tasks have always used.
+export async function createWorktree(repoPath: string, branchName: string, startPoint?: string): Promise<string> {
   const dir = worktreeDirFor(branchName);
   // A prior run for the same ticket (crashed, killed, or left mid-flow) can leave this
   // exact worktree registered — `git worktree add` then refuses the directory outright,
@@ -18,7 +22,9 @@ export async function createWorktree(repoPath: string, branchName: string): Prom
   // work. Reproduced live (XEN-364, re-run after an earlier kill): force-remove first:
   // any real in-progress work there was already pushed or abandoned by that earlier run.
   await execFileAsync("git", ["worktree", "remove", "--force", dir], { cwd: repoPath }).catch(() => {});
-  await execFileAsync("git", ["worktree", "add", "-B", branchName, dir], { cwd: repoPath });
+  const addArgs = ["worktree", "add", "-B", branchName, dir];
+  if (startPoint) addArgs.push(startPoint);
+  await execFileAsync("git", addArgs, { cwd: repoPath });
 
   // `git worktree add` gives a clean checkout with no node_modules (gitignored, not
   // part of the tree) — verifyCommand (yarn test/build) would fail on EVERY iteration
@@ -40,6 +46,16 @@ export async function createWorktree(repoPath: string, branchName: string): Prom
 
 export async function removeWorktree(repoPath: string, worktreeDir: string): Promise<void> {
   await execFileAsync("git", ["worktree", "remove", "--force", worktreeDir], { cwd: repoPath });
+}
+
+// `git worktree remove` only removes the directory — the branch itself survives.
+// Fine (intentional) for a real task's branch, which is meant to become an MR; not
+// fine for an eval run's throwaway branch, which would otherwise accumulate in the
+// target repo every time the eval set is run (reproduced live: a stray eval/xen-302-*
+// branch left behind after a single eval case). Call only for branches nothing should
+// ever need again.
+export async function deleteBranch(repoPath: string, branchName: string): Promise<void> {
+  await execFileAsync("git", ["branch", "-D", branchName], { cwd: repoPath }).catch(() => {});
 }
 
 export async function commitAll(worktreeDir: string, message: string): Promise<boolean> {
@@ -68,4 +84,14 @@ export async function getWorktreeDiff(worktreeDir: string, baseBranch: string): 
   await execFileAsync("git", ["add", "-N", "."], { cwd: worktreeDir });
   const { stdout } = await execFileAsync("git", ["diff", baseBranch], { cwd: worktreeDir, maxBuffer: 1024 * 1024 * 10 });
   return stdout;
+}
+
+// For evals: drops the real, historical test file(s) from a fix's own commit into a
+// worktree checked out at the commit *before* that fix — works whether each path was
+// brand new or pre-existing at that commit, since `checkout <commit> -- <path>` just
+// writes that commit's content for the path, same either way. Both commits already
+// exist in the same local repo's object database (no fetch needed): baseCommit is an
+// ancestor of referenceCommit in the same clone.
+export async function restorePathsFromCommit(worktreeDir: string, commit: string, paths: string[]): Promise<void> {
+  await execFileAsync("git", ["checkout", commit, "--", ...paths], { cwd: worktreeDir });
 }

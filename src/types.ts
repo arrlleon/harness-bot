@@ -38,6 +38,12 @@ export interface EngineConfig {
   permissionMode: string;
   model?: string;
   extraDeniedPaths?: string[];
+  // Internal to the eval harness (evals/runCase.ts): when set, runCloseLoop uses this
+  // worktree as-is instead of creating its own from repoPath/branchName — lets an eval
+  // case check out a specific historical commit and pre-stage the hidden test commit
+  // before the loop's own baseline ever runs, while reusing the entire rest of the
+  // production iteration/budget/stuck-detector/commit pipeline unchanged.
+  existingWorktreeDir?: string;
   // Present only when the task has frozen acceptance criteria to turn into an
   // executable gate. Absent (e.g. non-reviewed dispatch paths) means no acceptance
   // test is written and the loop behaves exactly as it did before this existed.

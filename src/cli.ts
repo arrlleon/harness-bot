@@ -93,6 +93,33 @@ program
   });
 
 program
+  .command("eval")
+  .description("Run the mini eval set (real historical bugs) against the current model/prompt config")
+  .option("--case <id...>", "Run only these case ids (default: all cases in evals/cases/)")
+  .option("--model <name>", "Override IMPLEMENT_MODEL for this run only, to compare models")
+  .action(async (opts) => {
+    const { config } = await import("./config.js");
+    const { runEvalSuite } = await import("./evals/runSuite.js");
+    const { formatSuiteReport } = await import("./evals/report.js");
+
+    const model = opts.model ?? config.models.implement;
+    console.log(`[eval] running ${opts.case ? opts.case.join(", ") : "all cases"} with model=${model}...`);
+
+    const { result, savedTo } = await runEvalSuite(opts.case, {
+      repos: config.repos,
+      model,
+      maxIterations: config.maxIterations,
+      maxBudgetUsd: config.maxBudgetUsd,
+      onCaseStart: (id) => console.log(`[eval] ${id}: starting...`),
+      onCaseDone: (r) => console.log(`[eval] ${r.caseId}: ${r.passed ? "PASS" : "FAIL"} (${r.stopReason}, $${r.costUsd.toFixed(4)})`),
+    });
+
+    console.log("\n" + formatSuiteReport(result));
+    console.log(`\n[eval] saved to ${savedTo}`);
+    process.exit(result.passCount === result.totalCount ? 0 : 1);
+  });
+
+program
   .command("dashboard")
   .description("Start only the dashboard web server (for testing without Telegram)")
   .action(async () => {

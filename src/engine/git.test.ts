@@ -6,7 +6,7 @@ import { mkdtemp, writeFile, readFile, rm, mkdir, realpath } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { createWorktree, removeWorktree, commitAll, getWorktreeDiff, worktreeDirFor } from "./git.js";
+import { createWorktree, removeWorktree, deleteBranch, commitAll, getWorktreeDiff, worktreeDirFor, restorePathsFromCommit } from "./git.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -183,6 +183,43 @@ test("getWorktreeDiff including untracked files doesn't change what commitAll la
   }
 });
 
+test("createWorktree accepts a startPoint and checks out that historical commit, not HEAD", async () => {
+  const repo = await makeRepo();
+  const branch = uniqueBranch();
+  try {
+    const baseCommit = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout.trim();
+    await writeFile(join(repo, "README.md"), "initial\nlater change\n");
+    await execFileAsync("git", ["commit", "-am", "later change"], { cwd: repo });
+
+    const dir = await createWorktree(repo, branch, baseCommit);
+    const content = await readFile(join(dir, "README.md"), "utf8");
+    assert.equal(content, "initial\n"); // the pre-"later change" state, not current HEAD
+  } finally {
+    await cleanup(repo, branch);
+  }
+});
+
+test("restorePathsFromCommit pulls a file's content from a later commit into an earlier-checked-out worktree", async () => {
+  const repo = await makeRepo();
+  const branch = uniqueBranch();
+  try {
+    const baseCommit = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout.trim();
+    await writeFile(join(repo, "hidden.spec.ts"), "it('from the fix commit', () => {});\n");
+    await execFileAsync("git", ["add", "-A"], { cwd: repo });
+    await execFileAsync("git", ["commit", "-m", "add hidden test"], { cwd: repo });
+    const referenceCommit = (await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: repo })).stdout.trim();
+
+    const dir = await createWorktree(repo, branch, baseCommit);
+    await assert.rejects(readFile(join(dir, "hidden.spec.ts"), "utf8")); // not present at baseCommit
+
+    await restorePathsFromCommit(dir, referenceCommit, ["hidden.spec.ts"]);
+    const content = await readFile(join(dir, "hidden.spec.ts"), "utf8");
+    assert.equal(content, "it('from the fix commit', () => {});\n");
+  } finally {
+    await cleanup(repo, branch);
+  }
+});
+
 test("removeWorktree makes the directory unusable as a worktree again", async () => {
   const repo = await makeRepo();
   const branch = uniqueBranch();
@@ -191,5 +228,27 @@ test("removeWorktree makes the directory unusable as a worktree again", async ()
 
   const { stdout } = await execFileAsync("git", ["worktree", "list"], { cwd: repo });
   assert.doesNotMatch(stdout, new RegExp(branch));
+  await rm(repo, { recursive: true, force: true });
+});
+
+// Regression (live eval smoke test): removeWorktree alone left a stray eval/xen-302-*
+// branch behind in front-ai — fine for a real task's branch (it's meant to become an
+// MR), not fine for an eval run's throwaway one, which would accumulate every run.
+test("deleteBranch removes a branch after its worktree is already gone", async () => {
+  const repo = await makeRepo();
+  const branch = uniqueBranch();
+  const dir = await createWorktree(repo, branch);
+  await removeWorktree(repo, dir);
+
+  await deleteBranch(repo, branch);
+
+  const { stdout } = await execFileAsync("git", ["branch", "--list", branch], { cwd: repo });
+  assert.equal(stdout.trim(), "");
+  await rm(repo, { recursive: true, force: true });
+});
+
+test("deleteBranch on a non-existent branch is a no-op, not an error", async () => {
+  const repo = await makeRepo();
+  await assert.doesNotReject(deleteBranch(repo, "no-such-branch"));
   await rm(repo, { recursive: true, force: true });
 });
