@@ -1,4 +1,4 @@
-import type { CloseLoopIteration, CloseLoopResult, EngineConfig, GateSpec, TaskSpec } from "../types.js";
+import type { CloseLoopIteration, CloseLoopResult, EngineConfig, GateSpec, ReviewFinding, TaskSpec } from "../types.js";
 import { runClaudeTurn } from "./claudeEngine.js";
 import { establishBaselines, runGates } from "./verify.js";
 import { buildFeedbackPrompt, buildInitialPrompt } from "./prompts.js";
@@ -6,6 +6,7 @@ import { createWorktree, commitAll } from "./git.js";
 import { writeAcceptanceTest } from "./acceptanceTest.js";
 import { readMemoryFiles, buildMemoryContextBlock, updateProjectMemory } from "./memory.js";
 import { fingerprintFailure } from "./stuckDetector.js";
+import { reviewChanges } from "./review.js";
 
 export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promise<CloseLoopResult> {
   const worktreeDir = config.existingWorktreeDir ?? (await createWorktree(config.repoPath, config.branchName));
@@ -94,6 +95,31 @@ export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promis
     if (verify.passed) {
       await commitAll(worktreeDir, `${task.id}: ${task.title}\n\nAutomated by jira-harness.`);
 
+      // Review runs on every real success, before memory — a change a human ends up
+      // rejecting shouldn't also leave a "durable fact" behind as if it shipped clean.
+      let reviewFindings: ReviewFinding[] | undefined;
+      if (config.review) {
+        config.onIteration?.({ iteration: i + 1, phase: "reviewing", costUsd: totalCostUsd, summary: "Ревьюю изменения" });
+        const reviewResult = await reviewChanges(worktreeDir, task, config.review);
+        totalCostUsd += reviewResult.costUsd;
+        reviewFindings = reviewResult.findings;
+        if (reviewResult.reason) config.onLog?.(`⚠️ Не удалось провести ревью (${reviewResult.reason})`);
+
+        const blocking = reviewFindings.filter((f) => f.blocking);
+        if (blocking.length > 0) {
+          return {
+            task,
+            success: false,
+            iterations,
+            totalCostUsd,
+            stopReason: "review_blocked",
+            worktreeDir,
+            acceptanceTestPath,
+            reviewFindings,
+          };
+        }
+      }
+
       let memoryUpdated = false;
       if (config.memory) {
         config.onIteration?.({ iteration: i + 1, phase: "updating_memory", costUsd: totalCostUsd, summary: "Обновляю project memory" });
@@ -103,7 +129,17 @@ export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promis
         if (memResult.reason) config.onLog?.(`⚠️ Не удалось обновить project memory (${memResult.reason})`);
       }
 
-      return { task, success: true, iterations, totalCostUsd, stopReason: "verified", worktreeDir, acceptanceTestPath, memoryUpdated };
+      return {
+        task,
+        success: true,
+        iterations,
+        totalCostUsd,
+        stopReason: "verified",
+        worktreeDir,
+        acceptanceTestPath,
+        memoryUpdated,
+        reviewFindings,
+      };
     }
 
     const failedGates = verify.gates.filter((g) => !g.passed);

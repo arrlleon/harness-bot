@@ -90,6 +90,9 @@ export const config = {
     // an existing notes file needs real judgment (avoid noise/dupes) but is one
     // read-only turn per successful task, not a loop — Sonnet, same tier as propose.
     memory: process.env.MEMORY_MODEL ?? "claude-sonnet-5",
+    // Catching what gates can't (architecture, security, edge cases) needs real
+    // capability, not just a bounded turn to save cost — Opus, same tier as implement.
+    review: process.env.REVIEW_MODEL ?? "claude-opus-5",
   },
   // On by default — this is the whole point of freezing acceptance criteria at
   // propose time. Kept as a single kill switch (not per-repo) so it can be turned
@@ -99,6 +102,10 @@ export const config = {
   // Same shape: on by default, one kill switch. Adds one extra read-only turn per
   // *successful* task (not per iteration) — cheap relative to propose/acceptance.
   memoryEnabled: (process.env.MEMORY_ENABLED ?? "true") !== "false",
+  // Same shape, same default. A blocking finding here routes through the existing
+  // needs_human flow instead of pushing — same mechanical "gates matter" principle,
+  // just for the category of problem gates structurally can't catch.
+  reviewEnabled: (process.env.REVIEW_ENABLED ?? "true") !== "false",
   maxIterations: Number(process.env.MAX_ITERATIONS ?? 5),
   maxBudgetUsd: Number(process.env.MAX_BUDGET_USD ?? 5),
   dailyBudgetUsd: Number(process.env.DAILY_BUDGET_USD ?? 20),

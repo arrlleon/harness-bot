@@ -51,9 +51,12 @@ export interface EngineConfig {
   // Absent disables the whole memory layer (no read injected into prompts, no write
   // attempted on success) — same opt-out shape as acceptanceTest.
   memory?: { model: string; baseBranch: string };
+  // Absent disables independent review entirely (no extra turn, no review_blocked
+  // outcome possible) — same opt-out shape as acceptanceTest/memory.
+  review?: { model: string; baseBranch: string };
   onIteration?: (info: {
     iteration: number;
-    phase: "baseline" | "writing_acceptance_test" | "iterating" | "verifying" | "updating_memory";
+    phase: "baseline" | "writing_acceptance_test" | "iterating" | "verifying" | "reviewing" | "updating_memory";
     costUsd: number;
     summary: string;
   }) => void;
@@ -100,7 +103,7 @@ export interface CloseLoopResult {
   success: boolean;
   iterations: CloseLoopIteration[];
   totalCostUsd: number;
-  stopReason: "verified" | "max_iterations" | "max_budget" | "agent_error" | "stuck";
+  stopReason: "verified" | "max_iterations" | "max_budget" | "agent_error" | "stuck" | "review_blocked";
   worktreeDir: string;
   // Set only when stopReason is "stuck" — the gate(s) whose failure fingerprint
   // repeated identically across two consecutive iterations, for diagnostics in the
@@ -113,4 +116,14 @@ export interface CloseLoopResult {
   // True only if the memory turn judged something durable happened and actually wrote
   // a commit for it — most successful tasks won't have anything worth recording.
   memoryUpdated?: boolean;
+  // Set whenever review ran, success or not — a blocking finding flips success to
+  // false (stopReason "review_blocked", routed through the existing needs_human flow,
+  // same as any other failure); nonblocking findings ride along even on a real success,
+  // for the MR description/Jira comment.
+  reviewFindings?: ReviewFinding[];
+}
+
+export interface ReviewFinding {
+  blocking: boolean;
+  description: string;
 }

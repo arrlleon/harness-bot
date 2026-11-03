@@ -372,6 +372,7 @@ async function runJob(
         ? { model: config.models.acceptance, runner: repo.acceptanceRunner, ext: repo.acceptanceTestExt }
         : undefined,
       memory: config.memoryEnabled ? { model: config.models.memory, baseBranch: config.gitlab.targetBranch } : undefined,
+      review: config.reviewEnabled ? { model: config.models.review, baseBranch: config.gitlab.targetBranch } : undefined,
       onIteration: ({ iteration, phase, costUsd, summary }) => {
         updateJob({ iteration, phase, costUsd, lastTurnSummary: summary });
         writeCheckpoint({
@@ -394,26 +395,25 @@ async function runJob(
   }
 
   if (!result.success) {
-    // "stuck" means the agent's last edit left the exact same gate(s) failing the
-    // exact same way — naming them up front saves a human from re-deriving that from
-    // the raw gate output before even knowing where to look.
-    const stopReasonLine =
-      result.stopReason === "stuck" && result.stuckGates?.length
-        ? `jira-harness did not close this task: stuck (same failure repeated in: ${result.stuckGates.join(", ")})`
-        : `jira-harness did not close this task: ${result.stopReason}`;
+    // "stuck" and "review_blocked" both have more to say than the bare stopReason word
+    // — naming the repeated gate(s) or the actual blocking finding(s) up front saves a
+    // human from re-deriving that from raw gate output or re-running the review turn.
+    let reason: string = result.stopReason;
+    if (result.stopReason === "stuck" && result.stuckGates?.length) {
+      reason = `stuck (same failure repeated in: ${result.stuckGates.join(", ")})`;
+    } else if (result.stopReason === "review_blocked" && result.reviewFindings?.length) {
+      const blocking = result.reviewFindings.filter((f) => f.blocking);
+      reason = `review_blocked: ${blocking.map((f) => f.description).join("; ")}`;
+    }
     await jira.addComment(
       issue.key,
       [
-        stopReasonLine,
+        `jira-harness did not close this task: ${reason}`,
         `cost: $${result.totalCostUsd.toFixed(4)}, iterations: ${result.iterations.length}`,
         `worktree left at: ${result.worktreeDir}`,
         "Left in-progress for a human to look at.",
       ].join("\n"),
     );
-    const reason =
-      result.stopReason === "stuck" && result.stuckGates?.length
-        ? `stuck (same failure repeated in: ${result.stuckGates.join(", ")})`
-        : result.stopReason;
     setPendingHumanReview({
       issueKey: issue.key,
       title: issue.summary,
@@ -452,6 +452,12 @@ async function runJob(
     updateJob({ phase: "pushing" });
     await pushBranch(result.worktreeDir, branchName);
     updateJob({ phase: "opening_mr" });
+    // Nonblocking findings didn't stop the push (that's the point — they're "worth
+    // knowing", not "wrong"), but they shouldn't be silently discarded either; a human
+    // reviewing the MR as usual sees them without needing the review turn re-run.
+    const reviewNote = result.reviewFindings?.length
+      ? `\n\nReview notes (nonblocking):\n${result.reviewFindings.map((f) => `- ${f.description}`).join("\n")}`
+      : "";
     const mr = await createMergeRequest({
       gitlabBaseUrl: config.gitlab.baseUrl,
       token: config.gitlab.token,
@@ -459,7 +465,7 @@ async function runJob(
       sourceBranch: branchName,
       targetBranch: config.gitlab.targetBranch,
       title: `${issue.key}: ${issue.summary}`,
-      description: `Automated by jira-harness for ${issue.key}.\n\ncost: $${result.totalCostUsd.toFixed(4)}, iterations: ${result.iterations.length}`,
+      description: `Automated by jira-harness for ${issue.key}.\n\ncost: $${result.totalCostUsd.toFixed(4)}, iterations: ${result.iterations.length}${reviewNote}`,
     });
     updateJob({ phase: "commenting" });
     await jira.addComment(issue.key, `jira-harness opened ${mr.webUrl} (cost: $${result.totalCostUsd.toFixed(4)})`);
