@@ -1,62 +1,71 @@
 # jira-harness
 
-Pulls tasks from Jira and runs the full close-out pipeline (implement → verify →
-iterate) until the task meets its acceptance criteria, driven from a Telegram
-bot with a live web dashboard. Target autonomy boundary: up to opening the
-MR and setting Jira status to "on review" — never auto-merge, never close the
-ticket itself.
+**Краткое описание.** jira-harness — это бот, который берёт тикеты из Jira и
+самостоятельно доводит их до готового merge request'а: анализирует задачу,
+пишет код, прогоняет тесты/линтер/тайпчек, при необходимости повторяет
+попытки с учётом ошибок, и в конце открывает MR в GitLab, переводя тикет в
+статус ревью. Управляется через Telegram — слэш-командами и свободным
+текстом — с живым веб-дашбордом для наблюдения за процессом. Граница
+автономности задана жёстко: бот доходит до открытия MR и перевода тикета на
+ревью — никогда не мержит сам и никогда не закрывает тикет.
 
-## Build plan
+## План сборки
 
-0. Credentials/infra
-1. **Core single-task close loop (done)** — prove execution + verification
-   works for one task, no Jira/Telegram yet
-2. **Jira queue (done)** — pull one assigned To Do ticket, route it to
-   back-ai/front-ai by a `[backend]`/`[frontend]` prefix, run it through the
-   Step 1 loop, push + open a GitLab MR, move the ticket to review
-3. **Telegram bot (done)** — `/start`/`/stop`/`/status`, drives the queue on
-   a poll loop, reports cost per task
-4. Token/cost tracking persisted across tasks — folded into step 3
+0. Доступы/инфраструктура
+1. **Базовый цикл на одну задачу (готово)** — доказать, что исполнение +
+   верификация работают для одной задачи, без Jira/Telegram
+2. **Очередь из Jira (готово)** — забрать один назначенный тикет из "To Do",
+   отправить в back-ai/front-ai по префиксу `[backend]`/`[frontend]`,
+   прогнать через цикл шага 1, запушить + открыть MR в GitLab, перевести
+   тикет на ревью
+3. **Telegram-бот (готово)** — `/start`/`/stop`/`/status` и другие команды,
+   ведёт очередь по поллингу, считает стоимость по задаче
+4. Учёт токенов/стоимости, сохраняется между задачами — встроено в шаг 3
    (`.harness-state/bot-state.json`)
-5. **Live web dashboard (done)** — `/dashboard` in Telegram, local-only
-6. **Guardrails (done)** — daily budget/task caps, mechanical deny-list for
-   migrations/CI/secrets/lockfiles
+5. **Живой веб-дашборд (готово)** — `/dashboard` в Telegram, только локально
+6. **Гварды (готово)** — дневные лимиты бюджета/количества задач, механический
+   deny-list для миграций/CI/секретов/lock-файлов
+7. **Тесты и обязательное покрытие ими (готово)** — `npm test` + git-хуки,
+   блокирующие коммит без тестов
+8. **Свободный чат, модели по ролям, несколько гейтов верификации, checkpoint
+   (готово)** — добавлено сверх первоначального плана
 
-## Step 1 design, and why it looks like this
+## Дизайн шага 1, и почему он так выглядит
 
-The engine drives the `claude` CLI headlessly (`-p --output-format json`),
-not the SDK and not `--bg`. Three things learned by testing against the real
-CLI, not assumed:
+Движок управляет CLI `claude` в headless-режиме (`-p --output-format json`),
+не через SDK и не через `--bg`. Три вещи, выясненные тестированием на реальном
+CLI, а не предположенные:
 
-- **ECC must be disabled globally** (`claude plugin disable ecc`). Installed
-  at user scope, its hooks match on tool name only (`Write`, `Edit`, `Bash`,
-  `.*`) with no project scoping, so they fire on every session anywhere,
-  including this harness's headless runs. One of them is interactive
-  (presents facts, waits on an answer) — with nobody attached to a
-  background session, it hangs forever. `--bare` looked like the fix but
-  can't be used instead: it only accepts `ANTHROPIC_API_KEY`, never the
-  subscription/OAuth login this account uses.
-- **The agent never runs Bash.** Even `--permission-mode bypassPermissions`
-  doesn't get unattended shell execution in a headless `-p` run — Claude
-  Code's Auto Mode classifier sits in front of the permission system and
-  blocks it independently (confirmed live: a trivial `echo` was denied with
-  "Blocked by classifier"). Rather than fight that layer, the agent gets
-  `--disallowedTools Bash` and only ever edits files; git (commit, and later
-  push/MR) is done by the harness's own trusted code, never the model. This
-  also matches DEVBOT's ADR-1 instinct (infra actions stay out of the
-  model's hands) even though the execution venue here is local, not CI.
-- **Each task runs in its own `git worktree`**, not a branch checked out in
-  the shared working copy. Needed for safe parallelism later (Step 2+ will
-  run multiple tasks at once) and keeps a stuck/misbehaving task from
-  touching the main checkout.
+- **ECC обязательно отключить глобально** (`claude plugin disable ecc`).
+  Установленный на уровне пользователя, его хуки матчатся только по имени
+  инструмента (`Write`, `Edit`, `Bash`, `.*`) без привязки к проекту, поэтому
+  срабатывают в любой сессии, включая headless-прогоны харнесса. Один из
+  хуков интерактивный (показывает факты, ждёт ответа) — без человека в
+  фоновой сессии он виснет навсегда. `--bare` выглядел как решение, но не
+  подходит: принимает только `ANTHROPIC_API_KEY`, а не подписочный/OAuth-логин
+  этого аккаунта.
+- **Агент никогда не запускает Bash.** Даже `--permission-mode
+  bypassPermissions` не даёт безнадзорного выполнения shell-команд в headless
+  `-p` режиме — классификатор Auto Mode у Claude Code стоит перед системой
+  разрешений и блокирует независимо от неё (подтверждено вживую: тривиальный
+  `echo` был отклонён с "Blocked by classifier"). Вместо борьбы с этим слоем
+  агент получает `--disallowedTools Bash` и только редактирует файлы; git
+  (коммит, а позже push/MR) делает собственный доверенный код харнесса,
+  никогда не модель. Это также соответствует инстинкту ADR-1 у DEVBOT
+  (инфраструктурные действия не доверяются модели), хотя здесь исполнение
+  происходит локально, а не в CI.
+- **Каждая задача работает в своём `git worktree`**, а не в ветке, зачекаученной
+  в общей рабочей копии. Нужно для безопасного параллелизма позже (шаг 2+
+  гоняет несколько задач) и не даёт зависшей/неправильно ведущей себя задаче
+  затронуть основной чекаут.
 
-Verification is an externally-supplied shell command (e.g. `pnpm test`) run
-directly by the harness via `child_process`, never by the agent — so a
-"passing" result can't be the model's own unverified claim.
+Верификация — это внешняя shell-команда (например `pnpm test`), запускаемая
+харнессом напрямую через `child_process`, никогда агентом — чтобы результат
+"прошло" не мог быть неподтверждённым заявлением самой модели.
 
-## Usage
+## Использование
 
-### Step 1: one-off task against any repo
+### Шаг 1: разовая задача в любом репозитории
 
 ```bash
 npm run build
@@ -68,173 +77,242 @@ node dist/cli.js run \
   --max-budget-usd 5
 ```
 
-`--task` also accepts a path to a `.json` file with the same shape, or a bare
-string (treated as an ad-hoc task description with no id/criteria). Output
-ends with the worktree path and branch name holding the committed fix;
-nothing is pushed.
+`--task` также принимает путь к `.json`-файлу с той же структурой, или просто
+строку (воспринимается как произвольное описание задачи без id/критериев). В
+конце вывода — путь к worktree и имя ветки с закоммиченным фиксом; ничего не
+пушится.
 
-### Step 2: Jira queue
+### Шаг 2: очередь из Jira
 
 ```bash
-cp .env.example .env   # fill in JIRA_PAT and GITLAB_TOKEN, check status names
+cp .env.example .env   # заполните JIRA_PAT и GITLAB_TOKEN, проверьте названия статусов
 npm run build
 node dist/cli.js queue
 ```
 
-Each run picks the single highest-priority ticket assigned to you in "To Do",
-moves it to "In Progress", runs the Step 1 loop against whichever repo its
-`[backend]`/`[frontend]` prefix points at, and on success pushes the branch
-and opens a GitLab MR before moving the ticket to the review status. A ticket
-is left "In Progress" with an explanatory comment (not silently retried) if:
-routing is ambiguous (no prefix), the loop didn't verify, or the push/MR step
-failed — those need a human to look, not another automatic attempt.
+Каждый запуск берёт один тикет с наивысшим приоритетом, назначенный на вас в
+"To Do", переводит в "In Progress", прогоняет через цикл шага 1 в том
+репозитории, на который указывает префикс `[backend]`/`[frontend]`, и при
+успехе пушит ветку и открывает MR в GitLab, после чего переводит тикет в
+статус ревью. Тикет остаётся "In Progress" с поясняющим комментарием (не
+повторяется молча), если: роутинг неоднозначен (нет префикса), цикл не прошёл
+верификацию, или не удался push/MR — это требует взгляда человека, а не ещё
+одной автоматической попытки.
 
-Run `queue` on a timer (cron, `watch`, or the Telegram bot in Step 3) to
-actually drain the queue; one invocation does exactly one ticket.
+Запускайте `queue` по таймеру (cron, `watch`, или Telegram-бот из шага 3),
+чтобы реально разгружать очередь — один вызов обрабатывает ровно один тикет.
 
-### Step 3: Telegram bot
+### Шаг 3: Telegram-бот
 
 ```bash
-# in .env: TELEGRAM_BOT_TOKEN (from @BotFather), TELEGRAM_ALLOWED_CHAT_IDS
-# (your numeric chat id, from @userinfobot — comma-separated for more than one)
+# в .env: TELEGRAM_BOT_TOKEN (от @BotFather), TELEGRAM_ALLOWED_CHAT_IDS
+# (ваш числовой chat id, от @userinfobot — через запятую, если их несколько)
 npm run build
 node dist/cli.js bot
 ```
 
-`TELEGRAM_ALLOWED_CHAT_IDS` is a hard allowlist, not a convenience default —
-the bot can push code and open MRs, so it silently drops commands from any
-chat not on the list rather than exposing that to whoever finds the bot.
+`TELEGRAM_ALLOWED_CHAT_IDS` — это жёсткий allowlist, а не удобство по
+умолчанию: бот может пушить код и открывать MR, поэтому он молча отбрасывает
+команды из любого чата не из списка, вместо того чтобы раскрывать себя кому
+попало.
 
-- `/start` — lists every ticket assigned to you in To Do *and* In Progress
-  (so a ticket already picked up by hand, or left mid-flow, stays visible),
-  one inline button per ticket. **It does not pick anything on its own.**
-  Tapping a button runs a read-only turn against just that ticket
-  (Edit/Write/Bash all denied — verified live: zero file changes, just a
-  short plan) and sends a Telegram message with the ticket's description,
-  the proposed solution, and inline **✅ Подтвердить / ❌ Отменить** buttons.
-  The actual close-loop (same pipeline as everywhere else — worktree, verify,
-  push, MR, review) only starts after you tap Подтвердить. Отменить records
-  the (small) analysis cost against the budget and skips that ticket for the
-  rest of the process's life, so it isn't immediately re-proposed. Only one
-  proposal is pending at a time; picking another ticket while one is pending
-  is refused until it's resolved.
-- `/status` — running state, all-time and today's cost, last ticket handled.
-- `/stop` — deactivates buttons on tickets already listed by `/start`
-  (call `/start` again for a fresh list); lets whatever's in flight finish
-  rather than killing it mid-task.
-- `/kill` — SIGTERMs the in-flight `claude` turn right now, for when it's
-  stuck or doing something you don't want to wait out. The interrupted task
-  surfaces as a queue error, not a silent disappearance.
-- `/budget` — today's spend and task count against `DAILY_BUDGET_USD` /
-  `MAX_TASKS_PER_DAY`, and the per-task caps.
-- `/peek` — shows the ticket that would be picked up next (key, summary,
-  which repo it routes to, first 1000 chars of its description) without
-  transitioning it or spending anything.
-- `/retry XEN-123` — moves a ticket stuck "needs a human" back into the
-  queue's pickup status, for after you've fixed whatever blocked it (e.g.
-  added the missing `[backend]`/`[web]` prefix).
-- `/help` — lists all of the above.
+- `/start` — показывает все тикеты, назначенные на вас, в "To Do" *и* "In
+  Progress" (чтобы тикет, уже взятый вручную или оставленный на середине,
+  оставался видимым), по одной инлайн-кнопке на тикет. **Сам по себе ничего не
+  выбирает.** Нажатие на кнопку запускает read-only ход только по этому
+  тикету (Edit/Write/Bash запрещены — подтверждено вживую: ноль изменений
+  файлов, только короткий план) и отправляет сообщение с описанием тикета,
+  предложенным решением и инлайн-кнопками **✅ Подтвердить / ❌ Отменить**.
+  Сам цикл (тот же пайплайн — worktree, верификация, push, MR, ревью) стартует
+  только после нажатия "Подтвердить". "Отменить" записывает (небольшую)
+  стоимость анализа в бюджет и пропускает этот тикет до конца жизни процесса,
+  чтобы он не предлагался снова сразу же. Одновременно висит только одно
+  предложение; выбор другого тикета, пока одно уже ожидает решения,
+  отклоняется до его разрешения.
+- `/status` — текущее состояние, стоимость за всё время и за сегодня,
+  последний обработанный тикет.
+- `/stop` — деактивирует кнопки у тикетов, уже показанных через `/start`
+  (вызовите `/start` заново для свежего списка); даёт текущей работе доехать
+  до конца, а не убивает её на середине.
+- `/kill` — немедленно шлёт SIGTERM текущему ходу `claude`, когда он завис или
+  делает что-то нежелательное. Прерванная задача проявляется как ошибка
+  очереди, а не молча исчезает.
+- `/budget` — сегодняшние траты и количество задач относительно
+  `DAILY_BUDGET_USD` / `MAX_TASKS_PER_DAY`, и лимиты на задачу.
+- `/peek` — показывает, какой тикет будет взят следующим (ключ, краткое
+  описание, в какой репозиторий роутится, первые 1000 символов описания), не
+  переводя его в работу и ничего не тратя.
+- `/retry XEN-123` — возвращает тикет, застрявший в "нужен человек", обратно в
+  статус очереди, после того как вы устранили то, что его заблокировало
+  (например, добавили недостающий префикс `[backend]`/`[web]`).
+- `/help` — список всего вышеперечисленного.
+- **Свободный текст** — помимо команд, боту можно писать обычным текстом:
+  небольшая классифицирующая модель (Haiku) определяет намерение и либо
+  вызывает тот же обработчик, что и соответствующая слэш-команда (поэтому
+  ответ с реальными цифрами — статусом, бюджетом — никогда не может быть
+  галлюцинацией модели, она лишь выбирает, какую команду вызвать), либо
+  отвечает как обычный чат. Команды и свободный текст работают параллельно,
+  не заменяя друг друга.
 
-State (history, running flag) persists to `.harness-state/bot-state.json`
-across bot restarts.
+После закрытия или отклонения любой задачи (мерж, "нужен человек", отмена)
+бот сам присылает обновлённый список тикетов — не нужно вызывать `/start`
+вручную перед каждой следующей задачей.
 
-### Step 5: live dashboard
+Состояние (история, флаг "запущено") сохраняется в
+`.harness-state/bot-state.json` между перезапусками бота.
 
-`/dashboard` in Telegram replies with an "Open dashboard" button linking to
-`http://localhost:4790` (`DASHBOARD_PORT`). The server starts automatically
-with the bot (`node dist/cli.js bot`), or standalone for testing with
+### "Нужен человек": ревью диффа прямо в Telegram
+
+Если цикл исчерпал итерации или не смог запушить/открыть MR, бот не
+выбрасывает проделанную работу — он присылает сам diff (обрезанный, если
+слишком длинный) с кнопками **✅ Принять и запушить / ❌ Отклонить**.
+"Принять" коммитит то, что осталось незакоммиченным, пушит и открывает MR тем
+же путём, что и обычный успех. "Отклонить" удаляет worktree и возвращает
+тикет в "To Do". Если бот перезапустится, пока решение не принято — оно
+восстановится из `.harness-state/pending-state.json` и придёт повторным
+уведомлением.
+
+### Модели по ролям
+
+Каждая роль в пайплайне использует свою модель, настраивается отдельными
+переменными окружения:
+
+- `CHAT_MODEL` (по умолчанию Haiku) — классификатор свободного текста в
+  Telegram: нужна скорость и дешевизна, не глубокое рассуждение, срабатывает
+  на каждое случайное сообщение.
+- `PROPOSE_MODEL` (по умолчанию Sonnet) — read-only анализ тикета и короткий
+  план перед апрувом.
+- `IMPLEMENT_MODEL` (по умолчанию Opus) — сам цикл правок и верификации;
+  здесь цена более слабой модели (худший дифф) перевешивает разницу в
+  стоимости.
+
+### Шаг 5: живой дашборд
+
+`/dashboard` в Telegram отвечает кнопкой "Open dashboard", ведущей на
+`http://localhost:4790` (`DASHBOARD_PORT`). Сервер стартует автоматически
+вместе с ботом (`node dist/cli.js bot`), или отдельно для тестирования через
 `node dist/cli.js dashboard`.
 
-It shows the one job currently in flight — queue processes tickets one at a
-time, so this is a single progress card, not a multi-agent grid: issue key,
-title, repo, phase (transitioning/iterating/verifying/pushing/opening_mr/
-commenting), iteration N/max, cost so far, elapsed time, the ticket's own
-description (collapsed), a scrolling live log of what the agent is actually
-doing (`Edit <file>`, `Grep "<pattern>"`, its own narration — streamed as it
-happens via `--output-format stream-json`, not polled after the fact) — plus
-the last 20 completed tasks (outcome, MR link or reason, cost, timestamp). It
-polls `/api/state` every 2s; no auth, since it only binds to localhost.
+Показывает одну задачу, которая сейчас в работе — очередь обрабатывает
+тикеты по одному, так что это одна карточка прогресса, а не сетка нескольких
+агентов: ключ тикета, заголовок, репозиторий, фаза
+(transitioning/iterating/verifying/pushing/opening_mr/commenting), итерация
+N/max, стоимость на текущий момент, прошедшее время, описание тикета
+(свёрнуто), прокручивающийся живой лог того, что агент реально делает
+(`Edit <file>`, `Grep "<pattern>"`, собственная озвучка — стримится по мере
+появления через `--output-format stream-json`, а не опрашивается постфактум)
+— плюс последние 20 завершённых задач (исход, ссылка на MR или причина,
+стоимость, время). Опрашивает `/api/state` каждые 2 секунды; без авторизации,
+так как привязан только к localhost.
 
-**Ticket list + manual dispatch.** A "next up" panel lists whatever's
-currently assigned to you in the queue's pickup status (same ticket pool
-`/peek` and the bot's auto-pick draw from), each with its description and
-detected repo, refreshed every 15s (`GET /api/tickets`, cached that long —
-it's a real Jira search, not free to poll every 2s). Clicking **Start** on
-one (`POST /api/tickets/:key/start`) dispatches that specific ticket through
-the same close-loop/push/MR/review-transition pipeline as the auto-picked
-path — it's "run this one now" layered on top of the queue, not a separate
-mechanism: same budget caps, same routing rules, same guardrails. A ticket
-whose prefix doesn't route anywhere is listed but its Start button is
-disabled. Only one job runs at a time; clicking Start while something's
-already in flight is rejected with 409 before touching Jira.
+**Список тикетов + ручной запуск.** Панель "следующие на очереди" показывает
+всё, что сейчас назначено на вас в статусе очереди для подбора (тот же пул
+тикетов, из которого берут `/peek` и автовыбор бота), с описанием и
+определённым репозиторием для каждого, обновляется каждые 15 секунд
+(`GET /api/tickets`, кэшируется на этот срок — это реальный поиск по Jira, не
+бесплатно опрашивать его каждые 2 секунды). Клик по **Start** на тикете
+(`POST /api/tickets/:key/start`) запускает именно этот тикет через тот же
+пайплайн цикл/push/MR/перевод-на-ревью, что и автовыбор — это "запустить вот
+этот прямо сейчас" поверх очереди, а не отдельный механизм: те же лимиты
+бюджета, те же правила роутинга, те же гварды. Тикет, чей префикс никуда не
+роутится, показывается в списке, но его кнопка Start отключена. Одновременно
+выполняется только одна задача; клик по Start, пока что-то уже в работе,
+отклоняется с 409 ещё до обращения к Jira.
 
-**The pixel-art scene** at the top is a parody of *The Last Supper* — nine
-robed figures in a hall with arched windows and tapestries, seated behind a
-long tablecloth-covered table (closer to the painting's composition than a
-first simplified pass: individual hair/beard colors, varied robe/accent
-colors, a visually distinct center figure). Idle (nothing in the queue): each
-bobs its own cup up to its mouth on an independent rhythm — having lunch.
-Working: a document tile travels hand-to-hand down the table in a loop, with
-the two figures currently passing it drawn with arms extended toward each
-other. Pure canvas `fillRect` pixel art (no image assets, no library),
-redrawn every 90ms; the mode is driven by whether `live.currentJob` is set in
-the same `/api/state` poll the rest of the page already uses. Verified by
-screenshotting the actual rendered page with headless Chrome, not just
-reading the code.
+**Пиксель-арт сцена** наверху — пародия на "Тайную вечерю": девять фигур в
+мантиях в зале со стрельчатыми окнами и гобеленами, сидящие за длинным столом
+под скатертью (ближе к композиции картины, чем первый упрощённый вариант:
+индивидуальные цвета волос/бороды, разные цвета мантий/акцентов, визуально
+выделенная центральная фигура). В режиме ожидания (в очереди пусто): каждая
+фигура подносит свою кружку ко рту в собственном независимом ритме — обедают.
+В работе: плитка-документ переходит из рук в руки вдоль стола по кругу, а две
+фигуры, которые её сейчас передают, нарисованы с вытянутыми друг к другу
+руками. Чистый пиксель-арт через canvas `fillRect` (без картинок-ассетов, без
+библиотек), перерисовывается каждые 90мс; режим определяется тем, установлено
+ли `live.currentJob` в том же опросе `/api/state`, который использует вся
+остальная страница. Проверено скриншотом реально отрендеренной страницы через
+headless Chrome, а не просто чтением кода.
 
-**UI**: entirely in Russian (dashboard and bot replies both), and organized
-into tabs — Текущая задача / Очередь / История — with a one-line hint under
-the tab bar explaining what each one shows, instead of one long stacked page.
+**Интерфейс**: полностью на русском (и дашборд, и ответы бота), организован
+во вкладки — Текущая задача / Очередь / История — с однострочной подсказкой
+под панелью вкладок, объясняющей, что показывает каждая, вместо одной длинной
+страницы.
 
-This only works from the same machine the bot runs on — the link is
-`localhost`, so Telegram Desktop there opens it in the default browser.
-Reaching it from a phone would need a tunnel (ngrok/cloudflared), which isn't
-wired up.
+Работает только с той же машины, на которой запущен бот — ссылка на
+`localhost`, поэтому Telegram Desktop там открывает её в браузере по
+умолчанию. Доступ с телефона потребовал бы туннель (ngrok/cloudflared), что
+не настроено.
 
-### Step 6: guardrails
+### Шаг 6: гварды
 
-Two independent layers, checked at different points:
+Два независимых слоя, проверяются в разные моменты:
 
-- **Daily caps** (`DAILY_BUDGET_USD`, `MAX_TASKS_PER_DAY`) — `runQueueOnce`
-  checks today's spend/task count against these *before* touching Jira at
-  all, so a cap never leaves a ticket stranded "In Progress" mid-transition.
-  Once hit, the queue returns `paused` and the bot reports it once (not every
-  idle poll) until the reason changes.
-- **Path deny-list** (`src/engine/guardrails.ts`) — migrations, `.env*`,
-  CI config, lockfiles, and key/pem files are mechanically unreachable by the
-  agent via Claude Code's own `--disallowedTools Edit(<glob>),Write(<glob>)`,
-  verified live: a denied path is refused at the tool-call level (the agent's
-  own turn reports it couldn't touch the file), not just discouraged by the
-  prompt. Applies to every `run`/`queue` invocation automatically; there's no
-  escape hatch to turn it off per-task.
+- **Дневные лимиты** (`DAILY_BUDGET_USD`, `MAX_TASKS_PER_DAY`) —
+  `runQueueOnce` проверяет сегодняшние траты/количество задач против этих
+  значений *до* любого обращения к Jira, чтобы лимит никогда не оставил
+  тикет застрявшим в "In Progress" на середине перевода. При достижении
+  очередь возвращает `paused`, и бот сообщает об этом один раз (не на каждый
+  холостой опрос), пока причина не изменится.
+- **Deny-list по путям** (`src/engine/guardrails.ts`) — миграции, `.env*`,
+  конфиги CI, lock-файлы и файлы ключей/pem механически недостижимы для
+  агента через собственный `--disallowedTools Edit(<glob>),Write(<glob>)` у
+  Claude Code, подтверждено вживую: запрещённый путь отклоняется на уровне
+  вызова инструмента (собственный ход агента сообщает, что не смог
+  коснуться файла), а не просто не рекомендуется в промпте. Применяется к
+  каждому вызову `run`/`queue` автоматически; отключить для отдельной задачи
+  нельзя.
 
-Per-task caps (`MAX_ITERATIONS`, `MAX_BUDGET_USD`) and the `[backend]`/
-`[frontend]`/`[web]`-ambiguity skip from Step 2 are the other two guardrails
-already in place from earlier steps.
+Лимиты на задачу (`MAX_ITERATIONS`, `MAX_BUDGET_USD`) и пропуск
+неоднозначных `[backend]`/`[frontend]`/`[web]` тикетов из шага 2 — два других
+гварда, уже работающих с более ранних шагов.
 
-### Step 7: tests, and a mechanical gate that enforces them
+### Проверка: несколько гейтов вместо одной команды
 
-`npm test` runs the suite via Node's built-in test runner (`node:test`,
-Node 20+) loaded through `tsx` — no extra test-framework dependency. Covers
-`detectRepo`/`toTaskSpec` routing, prompt formatting, the gate
-baseline-comparison logic from Step 6's verify engine, real temp-git-repo
-integration tests for worktree creation/commit/diff, and checkpoint
-write/recover.
+Вместо единственной команды верификации (`yarn test`) на репозиторий можно
+настроить несколько независимых гейтов — `typecheck`, `lint`, `test`,
+`build` — каждый со своим baseline-сравнением (переменные
+`*_GATE_TYPECHECK`/`*_GATE_LINT`/`*_GATE_BUILD` в `.env`, все опциональны).
+Гейт, который был сломан ещё до правки агента, не блокирует его — сравнение
+идёт со счётчиком ошибок/exit-кодом "до", а не с абсолютным требованием
+"всё зелёное". При провале агент получает отдельную секцию фидбека по
+каждому упавшему гейту, а не один общий текстовый блок — можно исправить
+tsc+lint+test за одну итерацию, а не гоняться за каждым по очереди.
 
-New features are expected to ship with tests in the same change — enforced
-mechanically, not left to memory, via two git hooks in `.githooks/`:
+### Checkpoint: восстановление после сбоя
 
-- **`pre-commit`**: runs the full suite; a failing test blocks the commit
-  outright.
-- **`commit-msg`**: blocks a commit that touches `src/**/*.ts` logic without
-  also touching a `*.test.ts` file — unless the commit message has an
-  explicit `No-Test: <reason>` line (for commits that genuinely don't need
-  one: docs, config, pure wiring). This is the intended way to skip the
-  check for a specific commit — not `git commit --no-verify`, which would
-  also skip the test-suite check above.
+После каждой итерации цикл сохраняет механический checkpoint
+(`.harness-state/checkpoints/<ISSUE-KEY>.json` — без коммита, без LLM) с
+информацией о том, какой worktree/ветка/итерация сейчас в работе. Если
+процесс бота упадёт посреди работы над тикетом (например, из-за нехватки
+памяти), при следующем запуске бот найдёт осиротевший checkpoint и покажет
+его как обычный "нужен человек" — с диффом и кнопками принять/отклонить —
+вместо того чтобы молча потерять проделанную работу.
 
-These aren't enabled by default on a fresh clone (`.git/hooks` isn't
-version-controlled) — point git at the tracked directory once:
+### Шаг 7: тесты, и механический гейт, который их требует
+
+`npm test` запускает набор через встроенный тест-раннер Node (`node:test`,
+Node 20+), загружаемый через `tsx` — без лишней зависимости на фреймворк
+тестирования. Покрывает роутинг `detectRepo`/`toTaskSpec`, форматирование
+промптов, логику baseline-сравнения гейтов из движка верификации шага 6,
+реальные интеграционные тесты на временных git-репозиториях для создания
+worktree/коммита/диффа, и запись/восстановление checkpoint.
+
+Новые функции должны поставляться с тестами в том же изменении — это
+требование проверяется механически, а не держится на памяти, через два
+git-хука в `.githooks/`:
+
+- **`pre-commit`**: прогоняет весь набор тестов; упавший тест блокирует
+  коммит целиком.
+- **`commit-msg`**: блокирует коммит, который трогает логику в
+  `src/**/*.ts`, но не затрагивает ни один `*.test.ts` файл — если только в
+  сообщении коммита нет явной строки `No-Test: <причина>` (для коммитов,
+  которым тест действительно не нужен: документация, конфиги, чистый
+  монтаж). Это предусмотренный способ пропустить проверку для конкретного
+  коммита — не `git commit --no-verify`, который заодно пропустил бы и
+  проверку тестов выше.
+
+Эти хуки не включены по умолчанию на свежем клоне (`.git/hooks` не
+версионируется) — один раз укажите git на отслеживаемую директорию:
 
 ```
 git config core.hooksPath .githooks
