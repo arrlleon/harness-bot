@@ -121,6 +121,7 @@ var PHASE_RU = {
   iterating: "работа над кодом",
   verifying: "проверка (тесты)",
   reviewing: "независимое ревью изменений",
+  writing_testing_notes: "пишу инструкцию для тестировщика",
   updating_memory: "обновляю project memory",
   pushing: "отправка ветки в репозиторий",
   opening_mr: "открытие MR",

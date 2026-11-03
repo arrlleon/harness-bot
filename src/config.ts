@@ -93,6 +93,10 @@ export const config = {
     // Catching what gates can't (architecture, security, edge cases) needs real
     // capability, not just a bounded turn to save cost — Opus, same tier as implement.
     review: process.env.REVIEW_MODEL ?? "claude-opus-5",
+    // Writing a tester's walkthrough from a diff + task description is the same
+    // bounded-judgment shape as propose/acceptance/memory, not an open-ended loop —
+    // Sonnet, same tier as those.
+    testing: process.env.TESTING_MODEL ?? "claude-sonnet-5",
   },
   // On by default — this is the whole point of freezing acceptance criteria at
   // propose time. Kept as a single kill switch (not per-repo) so it can be turned
@@ -106,6 +110,9 @@ export const config = {
   // needs_human flow instead of pushing — same mechanical "gates matter" principle,
   // just for the category of problem gates structurally can't catch.
   reviewEnabled: (process.env.REVIEW_ENABLED ?? "true") !== "false",
+  // Same shape, same default. Purely informational (never blocks a push) — one more
+  // read-only turn per successful task, same cost tier as review/memory.
+  testingNotesEnabled: (process.env.TESTING_NOTES_ENABLED ?? "true") !== "false",
   maxIterations: Number(process.env.MAX_ITERATIONS ?? 5),
   maxBudgetUsd: Number(process.env.MAX_BUDGET_USD ?? 5),
   dailyBudgetUsd: Number(process.env.DAILY_BUDGET_USD ?? 20),

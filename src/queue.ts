@@ -512,6 +512,9 @@ async function closeLoopAndPush(
         : undefined,
       memory: config.memoryEnabled ? { model: config.models.memory, baseBranch: config.gitlab.targetBranch } : undefined,
       review: config.reviewEnabled ? { model: config.models.review, baseBranch: config.gitlab.targetBranch } : undefined,
+      testingNotes: config.testingNotesEnabled
+        ? { model: config.models.testing, baseBranch: config.gitlab.targetBranch }
+        : undefined,
       onIteration: ({ iteration, phase, costUsd, summary }) => {
         updateJob({ iteration, phase, costUsd, lastTurnSummary: summary });
         writeCheckpoint({
@@ -626,9 +629,19 @@ async function runJob(
   }
 
   updateJob({ phase: "commenting" });
-  await jira.addComment(issue.key, `jira-harness opened ${outcome.mrUrl} (cost: $${result.totalCostUsd.toFixed(4)})`);
+  await jira.addComment(
+    issue.key,
+    `jira-harness opened ${outcome.mrUrl} (cost: $${result.totalCostUsd.toFixed(4)})${testingNotesSection(result.testingNotes)}`,
+  );
   await jira.transitionTo(issue.key, config.jira.reviewStatus);
   return { kind: "closed", issueKey: issue.key, costUsd: result.totalCostUsd, mrUrl: outcome.mrUrl! };
+}
+
+// Shared by the single-repo and cross-repo success comments — the whole point of the
+// testing-notes turn is that a tester reads it right there in Jira instead of having
+// to go dig through the MR, so it rides along in the same comment as the MR link.
+function testingNotesSection(notes: string | undefined): string {
+  return notes ? `\n\nКак тестировать:\n${notes}` : "";
 }
 
 const MAX_CROSS_REPO_CONTEXT_DIFF_CHARS = 8000; // same weight class as review.ts's own diff cap
@@ -737,6 +750,13 @@ async function runCrossRepoJob(
     };
   }
 
+  const crossRepoNotes = [
+    backendResult.testingNotes ? `Бэкенд:\n${backendResult.testingNotes}` : "",
+    frontendResult.testingNotes ? `Фронтенд:\n${frontendResult.testingNotes}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
   updateJob({ phase: "commenting" });
   await jira.addComment(
     issue.key,
@@ -745,7 +765,7 @@ async function runCrossRepoJob(
       `backend: ${backendOutcome.mrUrl}`,
       `frontend: ${frontendOutcome.mrUrl}`,
       `cost: $${totalCostUsd.toFixed(4)}`,
-    ].join("\n"),
+    ].join("\n") + testingNotesSection(crossRepoNotes || undefined),
   );
   await jira.transitionTo(issue.key, config.jira.reviewStatus);
   return {

@@ -7,6 +7,7 @@ import { writeAcceptanceTest } from "./acceptanceTest.js";
 import { readMemoryFiles, buildMemoryContextBlock, updateProjectMemory } from "./memory.js";
 import { fingerprintFailure } from "./stuckDetector.js";
 import { reviewChanges } from "./review.js";
+import { generateTestingNotes } from "./testingNotes.js";
 
 export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promise<CloseLoopResult> {
   const worktreeDir = config.existingWorktreeDir ?? (await createWorktree(config.repoPath, config.branchName));
@@ -120,6 +121,17 @@ export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promis
         }
       }
 
+      // Purely informational, never blocking (unlike review) — a tester's write-up
+      // isn't a gate, so its own failure just means no write-up, not a stuck task.
+      let testingNotes: string | undefined;
+      if (config.testingNotes) {
+        config.onIteration?.({ iteration: i + 1, phase: "writing_testing_notes", costUsd: totalCostUsd, summary: "Пишу инструкцию для тестировщика" });
+        const notesResult = await generateTestingNotes(worktreeDir, task, config.testingNotes);
+        totalCostUsd += notesResult.costUsd;
+        testingNotes = notesResult.notes;
+        if (notesResult.reason) config.onLog?.(`⚠️ Не удалось сгенерировать инструкцию для тестировщика (${notesResult.reason})`);
+      }
+
       let memoryUpdated = false;
       if (config.memory) {
         config.onIteration?.({ iteration: i + 1, phase: "updating_memory", costUsd: totalCostUsd, summary: "Обновляю project memory" });
@@ -139,6 +151,7 @@ export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promis
         acceptanceTestPath,
         memoryUpdated,
         reviewFindings,
+        testingNotes,
       };
     }
 

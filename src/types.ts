@@ -54,9 +54,13 @@ export interface EngineConfig {
   // Absent disables independent review entirely (no extra turn, no review_blocked
   // outcome possible) — same opt-out shape as acceptanceTest/memory.
   review?: { model: string; baseBranch: string };
+  // Absent disables the manual-testing-notes turn — same opt-out shape as
+  // acceptanceTest/memory/review. Never blocks anything (unlike review): it's purely
+  // informational output for a human tester, surfaced in the Jira success comment.
+  testingNotes?: { model: string; baseBranch: string };
   onIteration?: (info: {
     iteration: number;
-    phase: "baseline" | "writing_acceptance_test" | "iterating" | "verifying" | "reviewing" | "updating_memory";
+    phase: "baseline" | "writing_acceptance_test" | "iterating" | "verifying" | "reviewing" | "writing_testing_notes" | "updating_memory";
     costUsd: number;
     summary: string;
   }) => void;
@@ -130,6 +134,10 @@ export interface CloseLoopResult {
   // same as any other failure); nonblocking findings ride along even on a real success,
   // for the MR description/Jira comment.
   reviewFindings?: ReviewFinding[];
+  // Set whenever the testing-notes turn ran and produced non-empty output — a plain
+  // Предусловия/Шаги/Ожидаемый результат write-up for a human tester, surfaced in the
+  // Jira success comment. Absent if the turn was disabled, errored, or came back empty.
+  testingNotes?: string;
 }
 
 export interface ReviewFinding {

@@ -14,6 +14,7 @@ export type JobPhase =
   | "iterating"
   | "verifying"
   | "reviewing"
+  | "writing_testing_notes"
   | "updating_memory"
   | "pushing"
   | "opening_mr"
