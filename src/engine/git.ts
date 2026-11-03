@@ -57,7 +57,15 @@ export async function commitAll(worktreeDir: string, message: string): Promise<b
 // committed (verified, but push/MR failed — HEAD would show nothing). Diffing against
 // the branch point covers both the same way, so the human reviewing it sees the real
 // change regardless of which failure path got them here.
+//
+// `git add -N .` (intent-to-add) first: a plain `git diff <base>` is blind to brand-new
+// untracked files — reproduced live (XEN-427): the agent's actual new controller/module
+// files were completely absent from the reviewed diff, which showed only the files it
+// happened to *modify*. `-N` registers each untracked path in the index without staging
+// its content, which is enough for `git diff` (not `--cached`) to show it as an addition;
+// it doesn't change what a later `commitAll`'s own `git add -A` actually commits.
 export async function getWorktreeDiff(worktreeDir: string, baseBranch: string): Promise<string> {
+  await execFileAsync("git", ["add", "-N", "."], { cwd: worktreeDir });
   const { stdout } = await execFileAsync("git", ["diff", baseBranch], { cwd: worktreeDir, maxBuffer: 1024 * 1024 * 10 });
   return stdout;
 }

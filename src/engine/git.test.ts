@@ -146,6 +146,43 @@ test("getWorktreeDiff shows committed changes too (needs_human after a successfu
   }
 });
 
+// Regression (XEN-427 live run): a plain `git diff <base>` is blind to brand-new
+// untracked files — the agent's actual new controller/module was silently missing
+// from a needs_human review, which only showed the files it happened to modify.
+test("getWorktreeDiff includes brand-new untracked files, not just modified ones", async () => {
+  const repo = await makeRepo();
+  const branch = uniqueBranch();
+  try {
+    const dir = await createWorktree(repo, branch);
+    await mkdir(join(dir, "src", "new-feature"), { recursive: true });
+    await writeFile(join(dir, "src", "new-feature", "thing.ts"), "export const thing = 1;\n");
+
+    const diff = await getWorktreeDiff(dir, "main").catch(() => getWorktreeDiff(dir, "master"));
+    assert.match(diff, /src\/new-feature\/thing\.ts/);
+    assert.match(diff, /\+export const thing = 1;/);
+  } finally {
+    await cleanup(repo, branch);
+  }
+});
+
+test("getWorktreeDiff including untracked files doesn't change what commitAll later commits", async () => {
+  const repo = await makeRepo();
+  const branch = uniqueBranch();
+  try {
+    const dir = await createWorktree(repo, branch);
+    await writeFile(join(dir, "new-file.txt"), "hello\n");
+
+    await getWorktreeDiff(dir, "main").catch(() => getWorktreeDiff(dir, "master"));
+    const committed = await commitAll(dir, "commit after a diff was viewed");
+    assert.equal(committed, true);
+
+    const { stdout } = await execFileAsync("git", ["show", "--stat", "HEAD"], { cwd: dir });
+    assert.match(stdout, /new-file\.txt/);
+  } finally {
+    await cleanup(repo, branch);
+  }
+});
+
 test("removeWorktree makes the directory unusable as a worktree again", async () => {
   const repo = await makeRepo();
   const branch = uniqueBranch();
