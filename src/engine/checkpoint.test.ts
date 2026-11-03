@@ -113,6 +113,7 @@ test("recoverOrphanedCheckpoints skips an issue that already has a pendingApprov
     plan: "the plan",
     acceptanceCriteria: ["criterion one"],
     costUsd: 0.1,
+    costEstimate: null,
   });
   checkpoint.writeCheckpoint(sampleCheckpoint("XEN-103"));
 

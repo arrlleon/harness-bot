@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { CostEstimate } from "./state.js";
 
 // Overridable so tests (and checkpoint.ts, which shares this directory) can point at a
 // throwaway location instead of ever touching the real bot's persisted state on disk.
@@ -47,6 +48,10 @@ export interface PendingApproval {
   // code gets written, same spirit as Avengers Harness's frozen-acceptance-tests idea.
   acceptanceCriteria: string[];
   costUsd: number;
+  // Rough historical baseline (same-repo if there's enough of it, else overall) shown
+  // alongside the proposal so approving isn't a blind bet — null if there's no usable
+  // history yet (e.g. a fresh install, or this repo's very first task).
+  costEstimate: CostEstimate | null;
 }
 
 // A close-loop that ran out of iterations (or couldn't push/open an MR) still leaves

@@ -19,8 +19,19 @@ import {
 } from "./bot/liveState.js";
 import { commitAll, getWorktreeDiff, removeWorktree, worktreeDirFor } from "./engine/git.js";
 import { writeCheckpoint, clearCheckpoint } from "./engine/checkpoint.js";
-import { loadState, costSince, countSince, startOfTodayIso } from "./bot/state.js";
+import { loadState, costSince, countSince, startOfTodayIso, estimateCost, type CostEstimate } from "./bot/state.js";
 import type { CloseLoopResult, GateSpec, QueueRunOutcome, TaskSpec } from "./types.js";
+
+// What runJob itself can determine — it has no notion of elapsed wall-clock time or
+// which repo was targeted (that's dispatchIssue's job, wrapping the call). Same shape
+// as QueueRunOutcome's needs_human/closed variants minus durationMs/repo; dispatchIssue
+// adds those once, after runJob returns, rather than threading them through every one
+// of runJob's own return statements.
+type JobOutcome =
+  | { kind: "busy"; issueKey: string }
+  | { kind: "skipped"; issueKey: string; reason: string }
+  | { kind: "needs_human"; issueKey: string; costUsd: number; reason: string; worktreeDir: string; branchName: string }
+  | { kind: "closed"; issueKey: string; costUsd: number; mrUrl: string };
 
 const QUEUE_JQL = () =>
   `project = ${config.jira.projectKey} AND assignee = currentUser() AND statusCategory = "To Do" ORDER BY priority DESC`;
@@ -72,6 +83,7 @@ export interface Proposal {
   plan: string;
   acceptanceCriteria: string[];
   costUsd: number;
+  costEstimate: CostEstimate | null;
 }
 
 export type ProposeOutcome =
@@ -160,6 +172,7 @@ async function proposeIssue(
 
   const task = toTaskSpec(issue);
   const { plan, acceptanceCriteria, costUsd } = await proposeSolution(task, repo.path);
+  const costEstimate = estimateCost(loadState(), detection.kind);
 
   setPendingApproval({
     issueKey: issue.key,
@@ -170,6 +183,7 @@ async function proposeIssue(
     plan,
     acceptanceCriteria,
     costUsd,
+    costEstimate,
   });
 
   return {
@@ -182,6 +196,7 @@ async function proposeIssue(
       plan,
       acceptanceCriteria,
       costUsd,
+      costEstimate,
     },
   };
 }
@@ -249,6 +264,7 @@ export function cancelPending(): Proposal | null {
     plan: pending.plan,
     acceptanceCriteria: pending.acceptanceCriteria,
     costUsd: pending.costUsd,
+    costEstimate: pending.costEstimate,
   };
 }
 
@@ -307,8 +323,16 @@ async function dispatchIssue(jira: JiraClient, issue: JiraIssue, acceptanceCrite
   const branchName = `harness/${issue.key.toLowerCase()}`;
 
   startJob(issue.key, issue.summary, issue.description, detection.kind, config.maxIterations);
+  const startedAt = Date.now();
   try {
-    return await runJob(jira, issue, repo, task, branchName);
+    const outcome = await runJob(jira, issue, repo, task, branchName);
+    // durationMs/repo are added here, not inside runJob — one place computes them for
+    // every path that did real work (success or needs_human), instead of threading
+    // Date.now()/detection.kind through each of runJob's own return statements.
+    if (outcome.kind === "closed" || outcome.kind === "needs_human") {
+      return { ...outcome, durationMs: Date.now() - startedAt, repo: detection.kind };
+    }
+    return outcome;
   } finally {
     finishJob();
   }
@@ -348,7 +372,7 @@ async function runJob(
   repo: { path: string; gates: GateSpec[]; gitlabProjectPath: string; acceptanceRunner: string; acceptanceTestExt: string },
   task: ReturnType<typeof toTaskSpec>,
   branchName: string,
-): Promise<QueueRunOutcome> {
+): Promise<JobOutcome> {
   updateJob({ phase: "transitioning" });
   await jira.transitionTo(issue.key, config.jira.inProgressStatus);
 

@@ -95,8 +95,17 @@ export type QueueRunOutcome =
   | { kind: "paused"; reason: string }
   | { kind: "busy"; issueKey: string }
   | { kind: "skipped"; issueKey: string; reason: string }
-  | { kind: "needs_human"; issueKey: string; costUsd: number; reason: string; worktreeDir: string; branchName: string }
-  | { kind: "closed"; issueKey: string; costUsd: number; mrUrl: string };
+  | {
+      kind: "needs_human";
+      issueKey: string;
+      costUsd: number;
+      reason: string;
+      worktreeDir: string;
+      branchName: string;
+      durationMs: number;
+      repo: string;
+    }
+  | { kind: "closed"; issueKey: string; costUsd: number; mrUrl: string; durationMs: number; repo: string };
 
 export interface CloseLoopResult {
   task: TaskSpec;

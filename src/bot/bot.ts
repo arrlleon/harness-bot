@@ -83,6 +83,14 @@ function expandableBlockquote(lines: string[]): string {
 // Short header stays plain and always visible; the description/plan (routinely long
 // enough to bury the header below the fold — the actual complaint) collapse into one
 // tap-to-expand block instead of dumping both inline every time.
+function formatCostEstimate(estimate: Proposal["costEstimate"]): string {
+  if (!estimate) return "📊 оценка: недостаточно истории для прогноза";
+  const cost = `~$${escapeMarkdownV2(estimate.medianCostUsd.toFixed(2))}`;
+  const duration =
+    estimate.medianDurationMs !== null ? `, ~${escapeMarkdownV2(Math.round(estimate.medianDurationMs / 60_000).toString())} мин` : "";
+  return `📊 по истории (${estimate.sampleSize} задач): обычно ${cost}${duration}`;
+}
+
 function formatProposal(p: Proposal): string {
   const header = [
     `🆕 *${escapeMarkdownV2(p.issueKey)}*: ${escapeMarkdownV2(p.title)}`,
@@ -90,6 +98,7 @@ function formatProposal(p: Proposal): string {
     // toFixed's decimal point is itself a reserved MarkdownV2 character — reproduced
     // live ("Character '.' is reserved"), easy to miss since it looks like plain text.
     `💸 анализ стоил $${escapeMarkdownV2(p.costUsd.toFixed(4))}`,
+    formatCostEstimate(p.costEstimate),
   ].join("\n");
 
   // Shown here so approval is a real review of the contract, not a rubber stamp on
