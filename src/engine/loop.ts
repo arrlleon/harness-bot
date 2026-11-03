@@ -5,6 +5,7 @@ import { buildFeedbackPrompt, buildInitialPrompt } from "./prompts.js";
 import { createWorktree, commitAll } from "./git.js";
 import { writeAcceptanceTest } from "./acceptanceTest.js";
 import { readMemoryFiles, buildMemoryContextBlock, updateProjectMemory } from "./memory.js";
+import { fingerprintFailure } from "./stuckDetector.js";
 
 export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promise<CloseLoopResult> {
   const worktreeDir = await createWorktree(config.repoPath, config.branchName);
@@ -56,6 +57,10 @@ export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promis
   const iterations: CloseLoopIteration[] = [];
   let prompt = buildInitialPrompt(task, memoryContext);
   let resumeSessionId: string | undefined;
+  // Set once a failure happens, compared against the NEXT failure — not the error
+  // itself but whether the agent's last edit changed anything about its *nature*.
+  // Needs two failed iterations to ever trigger, so a single bad attempt never does.
+  let previousFingerprint: string | undefined;
 
   for (let i = 0; i < config.maxIterations; i++) {
     const remainingBudget = config.maxBudgetUsd - totalCostUsd;
@@ -101,7 +106,23 @@ export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promis
       return { task, success: true, iterations, totalCostUsd, stopReason: "verified", worktreeDir, acceptanceTestPath, memoryUpdated };
     }
 
-    prompt = buildFeedbackPrompt(verify.gates.filter((g) => !g.passed));
+    const failedGates = verify.gates.filter((g) => !g.passed);
+    const fingerprint = fingerprintFailure(failedGates);
+    if (fingerprint === previousFingerprint) {
+      return {
+        task,
+        success: false,
+        iterations,
+        totalCostUsd,
+        stopReason: "stuck",
+        worktreeDir,
+        acceptanceTestPath,
+        stuckGates: failedGates.map((g) => g.name),
+      };
+    }
+    previousFingerprint = fingerprint;
+
+    prompt = buildFeedbackPrompt(failedGates);
   }
 
   return { task, success: false, iterations, totalCostUsd, stopReason: "max_iterations", worktreeDir, acceptanceTestPath };

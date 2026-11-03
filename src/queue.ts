@@ -394,25 +394,36 @@ async function runJob(
   }
 
   if (!result.success) {
+    // "stuck" means the agent's last edit left the exact same gate(s) failing the
+    // exact same way — naming them up front saves a human from re-deriving that from
+    // the raw gate output before even knowing where to look.
+    const stopReasonLine =
+      result.stopReason === "stuck" && result.stuckGates?.length
+        ? `jira-harness did not close this task: stuck (same failure repeated in: ${result.stuckGates.join(", ")})`
+        : `jira-harness did not close this task: ${result.stopReason}`;
     await jira.addComment(
       issue.key,
       [
-        `jira-harness did not close this task: ${result.stopReason}`,
+        stopReasonLine,
         `cost: $${result.totalCostUsd.toFixed(4)}, iterations: ${result.iterations.length}`,
         `worktree left at: ${result.worktreeDir}`,
         "Left in-progress for a human to look at.",
       ].join("\n"),
     );
+    const reason =
+      result.stopReason === "stuck" && result.stuckGates?.length
+        ? `stuck (same failure repeated in: ${result.stuckGates.join(", ")})`
+        : result.stopReason;
     setPendingHumanReview({
       issueKey: issue.key,
       title: issue.summary,
-      reason: result.stopReason,
+      reason,
       costUsd: result.totalCostUsd,
       worktreeDir: result.worktreeDir,
       branchName,
       gitlabProjectPath: repo.gitlabProjectPath,
     });
-    return { kind: "needs_human", issueKey: issue.key, costUsd: result.totalCostUsd, reason: result.stopReason, worktreeDir: result.worktreeDir, branchName };
+    return { kind: "needs_human", issueKey: issue.key, costUsd: result.totalCostUsd, reason, worktreeDir: result.worktreeDir, branchName };
   }
 
   if (!config.gitlab.token) {

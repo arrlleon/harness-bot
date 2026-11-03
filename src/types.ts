@@ -94,8 +94,12 @@ export interface CloseLoopResult {
   success: boolean;
   iterations: CloseLoopIteration[];
   totalCostUsd: number;
-  stopReason: "verified" | "max_iterations" | "max_budget" | "agent_error";
+  stopReason: "verified" | "max_iterations" | "max_budget" | "agent_error" | "stuck";
   worktreeDir: string;
+  // Set only when stopReason is "stuck" — the gate(s) whose failure fingerprint
+  // repeated identically across two consecutive iterations, for diagnostics in the
+  // Jira comment / Telegram needs_human message.
+  stuckGates?: string[];
   // Set when an acceptance test was successfully written and frozen into the loop as
   // a gate; absent if none was requested, or the write attempt failed (see onLog for
   // why — the loop still proceeds without it rather than failing the whole task).
