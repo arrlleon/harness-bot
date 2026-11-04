@@ -120,6 +120,7 @@ var PHASE_RU = {
   baseline: "считаю baseline (сколько тестов падает и без фикса)",
   iterating: "работа над кодом",
   verifying: "проверка (тесты)",
+  checking_gate_integrity: "проверяю, не ослаблены ли гейты",
   reviewing: "независимое ревью изменений",
   writing_testing_notes: "пишу инструкцию для тестировщика",
   updating_memory: "обновляю project memory",

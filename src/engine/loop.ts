@@ -8,6 +8,7 @@ import { readMemoryFiles, buildMemoryContextBlock, updateProjectMemory } from ".
 import { fingerprintFailure } from "./stuckDetector.js";
 import { reviewChanges } from "./review.js";
 import { generateTestingNotes } from "./testingNotes.js";
+import { checkGateIntegrity } from "./gateIntegrity.js";
 
 export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promise<CloseLoopResult> {
   const worktreeDir = config.existingWorktreeDir ?? (await createWorktree(config.repoPath, config.branchName));
@@ -95,6 +96,32 @@ export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promis
 
     if (verify.passed) {
       await commitAll(worktreeDir, `${task.id}: ${task.title}\n\nAutomated by jira-harness.`);
+
+      // Runs before review/memory/testing-notes and short-circuits on a hit — if the
+      // agent earned "green" by weakening the judge rather than fixing the bug, there's
+      // no point spending an LLM turn reviewing that diff, and no retry: unlike a
+      // normal gate failure, giving it another attempt just risks it hiding this better.
+      if (config.gateIntegrityCheck) {
+        config.onIteration?.({
+          iteration: i + 1,
+          phase: "checking_gate_integrity",
+          costUsd: totalCostUsd,
+          summary: "Проверяю целостность гейтов",
+        });
+        const violations = await checkGateIntegrity(worktreeDir, config.gateIntegrityCheck.baseBranch);
+        if (violations.length > 0) {
+          return {
+            task,
+            success: false,
+            iterations,
+            totalCostUsd,
+            stopReason: "gate_integrity_violation",
+            worktreeDir,
+            acceptanceTestPath,
+            gateIntegrityViolations: violations.map((v) => v.description),
+          };
+        }
+      }
 
       // Review runs on every real success, before memory — a change a human ends up
       // rejecting shouldn't also leave a "durable fact" behind as if it shipped clean.

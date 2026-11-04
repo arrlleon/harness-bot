@@ -13,6 +13,7 @@ export type JobPhase =
   | "baseline"
   | "iterating"
   | "verifying"
+  | "checking_gate_integrity"
   | "reviewing"
   | "writing_testing_notes"
   | "updating_memory"

@@ -515,6 +515,7 @@ async function closeLoopAndPush(
       testingNotes: config.testingNotesEnabled
         ? { model: config.models.testing, baseBranch: config.gitlab.targetBranch }
         : undefined,
+      gateIntegrityCheck: config.gateIntegrityCheckEnabled ? { baseBranch: config.gitlab.targetBranch } : undefined,
       onIteration: ({ iteration, phase, costUsd, summary }) => {
         updateJob({ iteration, phase, costUsd, lastTurnSummary: summary });
         writeCheckpoint({
@@ -537,15 +538,18 @@ async function closeLoopAndPush(
   }
 
   if (!result.success) {
-    // "stuck" and "review_blocked" both have more to say than the bare stopReason word
-    // — naming the repeated gate(s) or the actual blocking finding(s) up front saves a
-    // human from re-deriving that from raw gate output or re-running the review turn.
+    // "stuck", "review_blocked" and "gate_integrity_violation" all have more to say
+    // than the bare stopReason word — naming the repeated gate(s), the actual blocking
+    // finding(s), or the specific tampering caught up front saves a human from
+    // re-deriving that from raw gate output or re-running the review turn.
     let reason: string = result.stopReason;
     if (result.stopReason === "stuck" && result.stuckGates?.length) {
       reason = `stuck (same failure repeated in: ${result.stuckGates.join(", ")})`;
     } else if (result.stopReason === "review_blocked" && result.reviewFindings?.length) {
       const blocking = result.reviewFindings.filter((f) => f.blocking);
       reason = `review_blocked: ${blocking.map((f) => f.description).join("; ")}`;
+    } else if (result.stopReason === "gate_integrity_violation" && result.gateIntegrityViolations?.length) {
+      reason = `gate_integrity_violation: ${result.gateIntegrityViolations.join("; ")}`;
     }
     return { closeLoopResult: result, failureReason: reason, failureKind: "loop" };
   }

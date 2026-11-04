@@ -122,6 +122,9 @@ export const config = {
   // Same shape, same default. Purely informational (never blocks a push) — one more
   // read-only turn per successful task, same cost tier as review/memory.
   testingNotesEnabled: (process.env.TESTING_NOTES_ENABLED ?? "true") !== "false",
+  // Same opt-out shape, but this one is pure diff parsing — no extra LLM turn, no extra
+  // cost or latency — so there's little reason to turn it off outside of debugging it.
+  gateIntegrityCheckEnabled: (process.env.GATE_INTEGRITY_CHECK_ENABLED ?? "true") !== "false",
   maxIterations: Number(process.env.MAX_ITERATIONS ?? 5),
   maxBudgetUsd: Number(process.env.MAX_BUDGET_USD ?? 5),
   dailyBudgetUsd: Number(process.env.DAILY_BUDGET_USD ?? 20),

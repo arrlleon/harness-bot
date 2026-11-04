@@ -58,9 +58,21 @@ export interface EngineConfig {
   // acceptanceTest/memory/review. Never blocks anything (unlike review): it's purely
   // informational output for a human tester, surfaced in the Jira success comment.
   testingNotes?: { model: string; baseBranch: string };
+  // Absent disables the mechanical gate-integrity check — same opt-out shape as the
+  // other optional stages, but this one costs no extra LLM turn (pure diff parsing),
+  // so there's little reason to ever turn it off outside of debugging it.
+  gateIntegrityCheck?: { baseBranch: string };
   onIteration?: (info: {
     iteration: number;
-    phase: "baseline" | "writing_acceptance_test" | "iterating" | "verifying" | "reviewing" | "writing_testing_notes" | "updating_memory";
+    phase:
+      | "baseline"
+      | "writing_acceptance_test"
+      | "iterating"
+      | "verifying"
+      | "checking_gate_integrity"
+      | "reviewing"
+      | "writing_testing_notes"
+      | "updating_memory";
     costUsd: number;
     summary: string;
   }) => void;
@@ -116,7 +128,7 @@ export interface CloseLoopResult {
   success: boolean;
   iterations: CloseLoopIteration[];
   totalCostUsd: number;
-  stopReason: "verified" | "max_iterations" | "max_budget" | "agent_error" | "stuck" | "review_blocked";
+  stopReason: "verified" | "max_iterations" | "max_budget" | "agent_error" | "stuck" | "review_blocked" | "gate_integrity_violation";
   worktreeDir: string;
   // Set only when stopReason is "stuck" — the gate(s) whose failure fingerprint
   // repeated identically across two consecutive iterations, for diagnostics in the
@@ -138,6 +150,12 @@ export interface CloseLoopResult {
   // Предусловия/Шаги/Ожидаемый результат write-up for a human tester, surfaced in the
   // Jira success comment. Absent if the turn was disabled, errored, or came back empty.
   testingNotes?: string;
+  // Set only when stopReason is "gate_integrity_violation" — a mechanical check (not
+  // an LLM judgment call) found the agent weakening the thing that judges it: a
+  // deleted test file, a newly added skip/only/todo marker, or an edit to CI/gate
+  // config. Always routes to needs_human, never retried — unlike a normal gate
+  // failure, giving the agent another attempt just risks it hiding this better.
+  gateIntegrityViolations?: string[];
 }
 
 export interface ReviewFinding {
