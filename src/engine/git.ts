@@ -49,11 +49,14 @@ export async function removeWorktree(repoPath: string, worktreeDir: string): Pro
 }
 
 // `git worktree remove` only removes the directory — the branch itself survives.
-// Fine (intentional) for a real task's branch, which is meant to become an MR; not
-// fine for an eval run's throwaway branch, which would otherwise accumulate in the
-// target repo every time the eval set is run (reproduced live: a stray eval/xen-302-*
-// branch left behind after a single eval case). Call only for branches nothing should
-// ever need again.
+// Harmless to call for a real task's branch too: by the time anything calls this, the
+// branch is already pushed and the MR is built from `origin/<branch>` on GitLab, so
+// deleting the local ref here loses nothing. Originally added for eval runs specifically
+// (reproduced live: a stray eval/xen-302-* branch left behind after a single eval case,
+// which would otherwise accumulate in the target repo on every eval-set run) — queue.ts
+// now calls it for real tasks too, once they reach a genuinely final state (closed, or
+// a needs_human case resolved either way). Call only for branches nothing should ever
+// need again — never on a worktree a needs_human outcome still has pending.
 export async function deleteBranch(repoPath: string, branchName: string): Promise<void> {
   await execFileAsync("git", ["branch", "-D", branchName], { cwd: repoPath }).catch(() => {});
 }

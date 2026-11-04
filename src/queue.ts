@@ -17,7 +17,7 @@ import {
   setPendingHumanReview,
   clearPendingHumanReview,
 } from "./bot/liveState.js";
-import { commitAll, getWorktreeDiff, removeWorktree, worktreeDirFor } from "./engine/git.js";
+import { commitAll, deleteBranch, getWorktreeDiff, removeWorktree, worktreeDirFor } from "./engine/git.js";
 import { writeCheckpoint, clearCheckpoint } from "./engine/checkpoint.js";
 import { loadState, costSince, countSince, startOfTodayIso, estimateCost, type CostEstimate } from "./bot/state.js";
 import type { CloseLoopResult, GateSpec, QueueRunOutcome, TaskSpec } from "./types.js";
@@ -638,6 +638,7 @@ async function runJob(
     `jira-harness opened ${outcome.mrUrl} (cost: $${result.totalCostUsd.toFixed(4)})${testingNotesSection(result.testingNotes)}`,
   );
   await jira.transitionTo(issue.key, config.jira.reviewStatus);
+  await cleanupWorktree(repo.path, result.worktreeDir, branchName);
   return { kind: "closed", issueKey: issue.key, costUsd: result.totalCostUsd, mrUrl: outcome.mrUrl! };
 }
 
@@ -646,6 +647,18 @@ async function runJob(
 // to go dig through the MR, so it rides along in the same comment as the MR link.
 function testingNotesSection(notes: string | undefined): string {
   return notes ? `\n\nКак тестировать:\n${notes}` : "";
+}
+
+// Called only once a task is genuinely done (MR opened, accepted after human review) —
+// never for a needs_human outcome, whose worktree/branch stay exactly where
+// resolveHumanReview expects to find them. The branch is pushed and the MR is already
+// open on GitLab by this point, so deleting the local worktree and branch loses nothing
+// — the remote ref `origin/<branch>` the MR is built from is untouched either way.
+// Without this, both accumulate on disk forever: confirmed live, nothing was ever
+// calling either for a real task before this.
+async function cleanupWorktree(repoPath: string, worktreeDir: string, branchName: string): Promise<void> {
+  await removeWorktree(repoPath, worktreeDir).catch(() => {});
+  await deleteBranch(repoPath, branchName);
 }
 
 const MAX_CROSS_REPO_CONTEXT_DIFF_CHARS = 8000; // same weight class as review.ts's own diff cap
@@ -700,13 +713,15 @@ async function runCrossRepoJob(
   }
 
   // Backend is pushed and its MR opened — hand the frontend turn the real diff instead
-  // of letting it guess the new API shape from the ticket text alone. Worktree still
-  // exists on disk (nothing removes it on a success path, single-repo or cross-repo).
+  // of letting it guess the new API shape from the ticket text alone.
   const backendDiff = await getWorktreeDiff(backendResult.worktreeDir, config.gitlab.targetBranch);
   const truncatedDiff =
     backendDiff.length > MAX_CROSS_REPO_CONTEXT_DIFF_CHARS
       ? backendDiff.slice(0, MAX_CROSS_REPO_CONTEXT_DIFF_CHARS) + "\n... (обрезано)"
       : backendDiff;
+  // Nothing after this point ever reads backend's worktree again — its own MR is
+  // already open, independent of whatever happens to the frontend half from here.
+  await cleanupWorktree(backend.repo.path, backendResult.worktreeDir, backend.branchName);
   const frontendTask: TaskSpec = {
     ...frontend.task,
     description: [
@@ -772,6 +787,7 @@ async function runCrossRepoJob(
     ].join("\n") + testingNotesSection(crossRepoNotes || undefined),
   );
   await jira.transitionTo(issue.key, config.jira.reviewStatus);
+  await cleanupWorktree(frontend.repo.path, frontendResult.worktreeDir, frontend.branchName);
   return {
     kind: "closed",
     issueKey: issue.key,
@@ -791,8 +807,10 @@ export async function resolveHumanReview(accept: boolean): Promise<{ mrUrl: stri
 
   const jira = new JiraClient(config.jira.baseUrl, config.jira.token);
 
+  const repoPath = repoPathFor(pending.gitlabProjectPath);
+
   if (!accept) {
-    await removeWorktree(repoPathFor(pending.gitlabProjectPath), pending.worktreeDir).catch(() => {});
+    await cleanupWorktree(repoPath, pending.worktreeDir, pending.branchName);
     await jira.addComment(pending.issueKey, "jira-harness: a human reviewed the pending diff and rejected it.");
     await jira.transitionTo(pending.issueKey, config.jira.todoStatus);
     return { rejected: true };
@@ -811,6 +829,7 @@ export async function resolveHumanReview(accept: boolean): Promise<{ mrUrl: stri
   });
   await jira.addComment(pending.issueKey, `jira-harness opened ${mr.webUrl} (accepted by a human after ${pending.reason})`);
   await jira.transitionTo(pending.issueKey, config.jira.reviewStatus);
+  await cleanupWorktree(repoPath, pending.worktreeDir, pending.branchName);
   return { mrUrl: mr.webUrl };
 }
 
