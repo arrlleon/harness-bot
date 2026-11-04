@@ -491,52 +491,56 @@ async function closeLoopAndPush(
   task: TaskSpec,
   branchName: string,
 ): Promise<CloseLoopAndPushOutcome> {
-  // Checkpoint is bookkeeping, not a resume mechanism: if this process dies mid-loop
-  // (OOM-kill etc.), the worktree on disk already has whatever the agent last wrote —
-  // the checkpoint just means a restart can find it and hand it to a human instead of
-  // leaving an untracked worktree rotting in /tmp forever. Cleared in the `finally`
-  // below the instant runCloseLoop is no longer in flight, success or not — from that
-  // point its own outcome handling (below) owns the worktree.
-  let result: CloseLoopResult;
-  try {
-    result = await runCloseLoop(task, {
-      repoPath: repo.path,
+  // Checkpoint is bookkeeping, not a resume mechanism: if this process dies mid-task
+  // (OOM-kill etc.), the worktree on disk already has whatever's there — the
+  // checkpoint just means a restart can find it and hand it to a human instead of
+  // leaving an untracked worktree rotting in /tmp forever. Deliberately stays alive
+  // through the ENTIRE function, not just the iteration loop: clearing it the instant
+  // runCloseLoop returned (the old behavior) left a real gap — a crash during push/MR/
+  // Jira-transition had no checkpoint (already cleared) AND no pendingHumanReview
+  // (not set yet), so that window had zero durable record of the task at all. The
+  // caller clears it once a final outcome is durably recorded elsewhere (closed, or
+  // a persisted pendingHumanReview) — see the clearCheckpoint calls in runJob/
+  // runCrossRepoJob.
+  const checkpointAt = (worktreeDir: string, iteration: number, costUsd: number, phase: string): void => {
+    writeCheckpoint({
+      issueKey: issue.key,
+      title: issue.summary,
       branchName,
-      gates: repo.gates,
+      worktreeDir,
+      gitlabProjectPath: repo.gitlabProjectPath,
+      iteration,
       maxIterations: config.maxIterations,
-      maxBudgetUsd: config.maxBudgetUsd,
-      maxContextTokens: config.maxContextTokens,
-      permissionMode: "acceptEdits",
-      model: config.models.implement,
-      acceptanceTest: config.acceptanceTestsEnabled
-        ? { model: config.models.acceptance, runner: repo.acceptanceRunner, ext: repo.acceptanceTestExt }
-        : undefined,
-      memory: config.memoryEnabled ? { model: config.models.memory, baseBranch: config.gitlab.targetBranch } : undefined,
-      review: config.reviewEnabled ? { model: config.models.review, baseBranch: config.gitlab.targetBranch } : undefined,
-      testingNotes: config.testingNotesEnabled
-        ? { model: config.models.testing, baseBranch: config.gitlab.targetBranch }
-        : undefined,
-      gateIntegrityCheck: config.gateIntegrityCheckEnabled ? { baseBranch: config.gitlab.targetBranch } : undefined,
-      onIteration: ({ iteration, phase, costUsd, summary }) => {
-        updateJob({ iteration, phase, costUsd, lastTurnSummary: summary });
-        writeCheckpoint({
-          issueKey: issue.key,
-          title: issue.summary,
-          branchName,
-          worktreeDir: worktreeDirFor(branchName),
-          gitlabProjectPath: repo.gitlabProjectPath,
-          iteration,
-          maxIterations: config.maxIterations,
-          costUsd,
-          phase,
-          savedAt: new Date().toISOString(),
-        });
-      },
-      onLog: appendLog,
+      costUsd,
+      phase,
+      savedAt: new Date().toISOString(),
     });
-  } finally {
-    clearCheckpoint(issue.key);
-  }
+  };
+
+  const result = await runCloseLoop(task, {
+    repoPath: repo.path,
+    branchName,
+    gates: repo.gates,
+    maxIterations: config.maxIterations,
+    maxBudgetUsd: config.maxBudgetUsd,
+    maxContextTokens: config.maxContextTokens,
+    permissionMode: "acceptEdits",
+    model: config.models.implement,
+    acceptanceTest: config.acceptanceTestsEnabled
+      ? { model: config.models.acceptance, runner: repo.acceptanceRunner, ext: repo.acceptanceTestExt }
+      : undefined,
+    memory: config.memoryEnabled ? { model: config.models.memory, baseBranch: config.gitlab.targetBranch } : undefined,
+    review: config.reviewEnabled ? { model: config.models.review, baseBranch: config.gitlab.targetBranch } : undefined,
+    testingNotes: config.testingNotesEnabled
+      ? { model: config.models.testing, baseBranch: config.gitlab.targetBranch }
+      : undefined,
+    gateIntegrityCheck: config.gateIntegrityCheckEnabled ? { baseBranch: config.gitlab.targetBranch } : undefined,
+    onIteration: ({ iteration, phase, costUsd, summary }) => {
+      updateJob({ iteration, phase, costUsd, lastTurnSummary: summary });
+      checkpointAt(worktreeDirFor(branchName), iteration, costUsd, phase);
+    },
+    onLog: appendLog,
+  });
 
   if (!result.success) {
     // "stuck", "review_blocked" and "gate_integrity_violation" all have more to say
@@ -563,8 +567,10 @@ async function closeLoopAndPush(
 
   try {
     updateJob({ phase: "pushing" });
+    checkpointAt(result.worktreeDir, result.iterations.length, result.totalCostUsd, "pushing");
     await pushBranch(result.worktreeDir, branchName);
     updateJob({ phase: "opening_mr" });
+    checkpointAt(result.worktreeDir, result.iterations.length, result.totalCostUsd, "opening_mr");
     // Nonblocking findings didn't stop the push (that's the point — they're "worth
     // knowing", not "wrong"), but they shouldn't be silently discarded either; a human
     // reviewing the MR as usual sees them without needing the review turn re-run.
@@ -625,6 +631,11 @@ async function runJob(
       branchName,
       gitlabProjectPath: repo.gitlabProjectPath,
     });
+    // pendingHumanReview is now the durable record for this task — the checkpoint
+    // would just be redundant from here (recoverOrphanedCheckpoints already skips an
+    // issue that has one anyway, but clearing it keeps there from being two records
+    // of the same thing).
+    clearCheckpoint(issue.key);
     return {
       kind: "needs_human",
       issueKey: issue.key,
@@ -642,6 +653,7 @@ async function runJob(
   );
   await jira.transitionTo(issue.key, config.jira.reviewStatus);
   await cleanupWorktree(repo.path, result.worktreeDir, branchName);
+  clearCheckpoint(issue.key);
   return { kind: "closed", issueKey: issue.key, costUsd: result.totalCostUsd, mrUrl: outcome.mrUrl! };
 }
 
@@ -705,6 +717,7 @@ async function runCrossRepoJob(
       branchName: backend.branchName,
       gitlabProjectPath: backend.repo.gitlabProjectPath,
     });
+    clearCheckpoint(issue.key);
     return {
       kind: "needs_human",
       issueKey: issue.key,
@@ -724,7 +737,12 @@ async function runCrossRepoJob(
       : backendDiff;
   // Nothing after this point ever reads backend's worktree again — its own MR is
   // already open, independent of whatever happens to the frontend half from here.
+  // Clearing the checkpoint here (not just on the two exits below) matters for cross-
+  // repo specifically: backend and frontend share the same issue key, so frontend's
+  // own checkpoint writes (started below) would otherwise land on the same file backend
+  // was still using.
   await cleanupWorktree(backend.repo.path, backendResult.worktreeDir, backend.branchName);
+  clearCheckpoint(issue.key);
   const frontendTask: TaskSpec = {
     ...frontend.task,
     description: [
@@ -762,6 +780,7 @@ async function runCrossRepoJob(
       branchName: frontend.branchName,
       gitlabProjectPath: frontend.repo.gitlabProjectPath,
     });
+    clearCheckpoint(issue.key);
     return {
       kind: "needs_human",
       issueKey: issue.key,
@@ -791,6 +810,7 @@ async function runCrossRepoJob(
   );
   await jira.transitionTo(issue.key, config.jira.reviewStatus);
   await cleanupWorktree(frontend.repo.path, frontendResult.worktreeDir, frontend.branchName);
+  clearCheckpoint(issue.key);
   return {
     kind: "closed",
     issueKey: issue.key,
