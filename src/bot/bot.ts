@@ -27,21 +27,26 @@ function statusTag(status: string | undefined): string {
   return "[?]"; // shouldn't happen — listMenuCandidates already filters to these two
 }
 
+// Everything user-facing in this file speaks as one persona — "Зам. CEO" — not as a
+// bare command dispatcher. The user explicitly wants this bot to feel like talking to
+// someone who's actually handling the tickets, not reading machine log lines; the
+// underlying data (cost, plans, diffs) is never invented or reworded, only the framing
+// around it is. See classifyMessage below for the free-text half of this.
 const HELP_TEXT = [
-  "jira-harness — забирает назначенные тебе тикеты из Jira, предлагает решение и, после твоего подтверждения, реализует, проверяет, открывает MR и переводит на ревью.",
+  "Я — твой зам. CEO по тикетам из Jira: слежу за очередью, читаю задачу и предлагаю решение, а как только одобришь — довожу до MR и держу в курсе на каждом шаге.",
   "",
-  "/start — показать список твоих задач («Сделать» + «В работе») с кнопками, выбрать — начнётся анализ именно этой",
-  "/stop — деактивировать кнопки уже показанных списков (текущая работа и ожидающее подтверждение не затрагиваются)",
-  "/kill — немедленно прервать текущий ход агента (если завис или делает не то)",
-  "/status — состояние, расход, последний обработанный тикет",
+  "/start — покажу список твоих задач («Сделать» + «В работе») с кнопками, выбери — начну разбираться именно с этой",
+  "/stop — деактивирую кнопки в уже показанных списках (то, что уже в работе или ждёт твоего решения, не трогаю)",
+  "/kill — немедленно прерву текущий ход (если завис или делает не то)",
+  "/status — расскажу, что сейчас происходит, расход, последний обработанный тикет",
   "/budget — расход/число задач за сегодня относительно дневных лимитов",
-  "/peek — показать следующий тикет в очереди, не запуская его",
-  "/retry XEN-123 — вернуть тикет, застрявший в «нужен человек», обратно в очередь",
-  "«нужен человек» теперь сразу показывает diff с кнопками ✅ Принять/❌ Отклонить — можно запушить уже сделанную работу вручную, даже если харнесс сам сдался",
+  "/peek — покажу следующий тикет в очереди, не запуская его",
+  "/retry XEN-123 — верну тикет, застрявший в «нужен человек», обратно в очередь",
+  "«нужен человек» — сразу присылаю diff с кнопками ✅ Принять/❌ Отклонить: можно запушить уже сделанную работу вручную, даже если сам я сдался",
   "/dashboard — ссылка на живой локальный дашборд",
   "/help — это сообщение",
   "",
-  "Можно просто написать сообщение без команды (вопрос, просьба) — отвечу или выполню нужную команду, если это похоже на одну из них.",
+  "Можешь просто написать мне, без команды — отвечу или сделаю то, что просишь, если это похоже на одну из команд выше.",
 ].join("\n");
 
 function describeOutcome(outcome: QueueRunOutcome | { kind: "error"; message: string }): string | null {
@@ -49,17 +54,17 @@ function describeOutcome(outcome: QueueRunOutcome | { kind: "error"; message: st
     case "empty":
       return null;
     case "paused":
-      return `⏸ пауза: ${outcome.reason}`;
+      return `⏸ Приостановился: ${outcome.reason}`;
     case "busy":
       return null;
     case "skipped":
-      return `⏭ ${outcome.issueKey}: пропущен (${outcome.reason})`;
+      return `⏭ Пропустил ${outcome.issueKey} (${outcome.reason})`;
     case "needs_human":
-      return `⚠️ ${outcome.issueKey}: нужен человек (${outcome.reason}), потрачено $${outcome.costUsd.toFixed(4)}`;
+      return `⚠️ Застрял на ${outcome.issueKey} (${outcome.reason}), потратил $${outcome.costUsd.toFixed(4)} — нужно твоё решение`;
     case "closed":
-      return `✅ ${outcome.issueKey}: закрыт, ${outcome.mrUrl}, потрачено $${outcome.costUsd.toFixed(4)}`;
+      return `✅ Готово: ${outcome.issueKey} закрыт, MR — ${outcome.mrUrl} (потратил $${outcome.costUsd.toFixed(4)})`;
     case "error":
-      return `❌ ошибка: ${outcome.message}`;
+      return `❌ Не получилось: ${outcome.message}`;
   }
 }
 
@@ -93,6 +98,8 @@ function formatCostEstimate(estimate: Proposal["costEstimate"]): string {
 
 function formatProposal(p: Proposal): string {
   const header = [
+    "Смотрю задачу — вот что предлагаю:",
+    "",
     `🆕 *${escapeMarkdownV2(p.issueKey)}*: ${escapeMarkdownV2(p.title)}`,
     `📦 репозиторий: ${escapeMarkdownV2(REPO_RU[p.repo] ?? p.repo)}`,
     // toFixed's decimal point is itself a reserved MarkdownV2 character — reproduced
@@ -139,21 +146,21 @@ async function sendNeedsHumanReview(
   try {
     diff = await getPendingHumanReviewDiff();
   } catch (err) {
-    await send(`⚠️ ${outcome.issueKey}: нужен человек (${outcome.reason}), потрачено $${outcome.costUsd.toFixed(4)}\nНе удалось прочитать diff: ${(err as Error).message}`);
+    await send(`⚠️ Застрял на ${outcome.issueKey} (${outcome.reason}), потратил $${outcome.costUsd.toFixed(4)} — нужно твоё решение.\nНе удалось прочитать diff: ${(err as Error).message}`);
     return;
   }
   if (!diff) {
     // pendingHumanReview was already cleared somehow (e.g. a second needs_human
     // landed before this one was reviewed) — nothing to show, say so plainly.
-    await send(`⚠️ ${outcome.issueKey}: нужен человек (${outcome.reason}), потрачено $${outcome.costUsd.toFixed(4)}`);
+    await send(`⚠️ Застрял на ${outcome.issueKey} (${outcome.reason}), потратил $${outcome.costUsd.toFixed(4)} — нужно твоё решение.`);
     return;
   }
   const truncated = diff.length > MAX_DIFF_CHARS;
   const diffText = truncated ? diff.slice(0, MAX_DIFF_CHARS) + "\n… (обрезано, полный diff в worktree)" : diff;
   const text = [
-    `⚠️ ${outcome.issueKey}: нужен человек (${outcome.reason}), потрачено $${outcome.costUsd.toFixed(4)}`,
+    `⚠️ Застрял на ${outcome.issueKey} (${outcome.reason}), потратил $${outcome.costUsd.toFixed(4)} — нужно твоё решение.`,
     "",
-    diff.trim() ? diffText : "(diff пустой — похоже, агент ничего не изменил)",
+    diff.trim() ? diffText : "(diff пустой — похоже, ничего не изменил)",
   ].join("\n");
   const keyboard = new InlineKeyboard()
     .text("✅ Принять и запушить", `accept_human:${outcome.issueKey}`)
@@ -321,7 +328,7 @@ export async function startBot(): Promise<void> {
   async function handleStop(ctx: Context): Promise<void> {
     state.running = false;
     saveState(state);
-    await ctx.reply("🛑 Ок. Кнопки в уже показанных списках задач больше не сработают — вызови /start заново, когда понадобится.");
+    await ctx.reply("🛑 Понял. Кнопки в уже показанных списках задач больше не сработают — напиши /start заново, когда понадобится.");
   }
   bot.command("stop", handleStop);
 
@@ -329,7 +336,7 @@ export async function startBot(): Promise<void> {
     state.running = false;
     saveState(state);
     const killed = killCurrentTurn();
-    await ctx.reply(killed ? "⛔ Прервал текущий ход. Поиск новых тикетов тоже останавливаю." : "🤷 Сейчас ничего не выполняется. Останавливаю поиск новых тикетов.");
+    await ctx.reply(killed ? "⛔ Прервал текущий ход. Поиск новых тикетов тоже останавливаю." : "🤷 Сейчас ничего не делаю. Останавливаю поиск новых тикетов.");
   }
   bot.command("kill", handleKill);
 
@@ -339,7 +346,7 @@ export async function startBot(): Promise<void> {
     const tasks = countSince(state, todayIso);
     const lines = [
       "💰 Бюджет",
-      `потрачено сегодня: $${spent.toFixed(4)} / $${config.dailyBudgetUsd}`,
+      `потратил сегодня: $${spent.toFixed(4)} / $${config.dailyBudgetUsd}`,
       `задач сегодня: ${tasks} / ${config.maxTasksPerDay}`,
       `лимит на задачу: $${config.maxBudgetUsd}, ${config.maxIterations} итераций`,
     ];
@@ -399,12 +406,12 @@ export async function startBot(): Promise<void> {
     const last = state.history.at(-1);
     const pending = getLiveState().pendingApproval;
     const lines = [
-      `${state.running ? "🟢" : "⚪️"} запущено: ${state.running ? "да" : "нет"}`,
-      `💰 всего потрачено: $${totalCostUsd(state).toFixed(4)}`,
+      `${state.running ? "🟢" : "⚪️"} ${state.running ? "работаю" : "не запущен"}`,
+      `💰 всего потратил: $${totalCostUsd(state).toFixed(4)}`,
       `сегодня: $${costSince(state, startOfTodayIso()).toFixed(4)}`,
-      `📈 задач обработано: ${state.history.length}`,
-      pending ? `⏳ ждёт подтверждения: ${pending.issueKey}` : "⏳ ждёт подтверждения: ничего",
-      last ? `последний: ${last.issueKey} (${last.outcome}) — ${last.detail}` : "последний: пока нет",
+      `📈 задач обработал: ${state.history.length}`,
+      pending ? `⏳ жду твоего решения по: ${pending.issueKey}` : "⏳ ничего не жду от тебя сейчас",
+      last ? `последнее: ${last.issueKey} (${last.outcome}) — ${last.detail}` : "последнее: пока ничего",
     ];
     await ctx.reply(lines.join("\n"));
   }
@@ -526,14 +533,19 @@ export async function startBot(): Promise<void> {
     return { intent: "chat", reply: raw.trim() || "Не понял, можешь переформулировать?" };
   }
 
+  // This is the actual conversational half of the "Зам. CEO" persona — everywhere else
+  // in this file reports structured outcomes, but a free-text message is exactly where
+  // the user is talking to someone, not clicking a button. The model answers in
+  // character, but never invents bot data: a request for real numbers (cost/status/
+  // queue) always becomes an intent the bot resolves with real data, never a guessed
+  // "chat" reply.
   async function classifyMessage(text: string): Promise<ChatIntent> {
     const prompt = [
-      "Ты — диспетчер Telegram-бота jira-harness (автоматизация закрытия тикетов Jira), а",
-      "не сам бот: ты ТОЛЬКО выбираешь, какую из его команд вызвать. Сам бот, получив",
-      "выбранный intent, сходит за РЕАЛЬНЫМИ живыми данными (расход, статус, очередь) и",
-      "пришлёт их отдельным сообщением — твоя JSON-метка это и запускает. Поэтому если",
-      "сообщение спрашивает именно о таких живых данных, уверенно выбирай intent status/",
-      "budget/list/peek, а НЕ chat — у бота эти данные есть, просто не в этом сообщении.",
+      "Ты — Зам. CEO внутри бота jira-harness: ты на прямой связи с CEO по работе над",
+      "тикетами из Jira. Любое его сообщение без команды попадает сюда. Если ответ требует",
+      "РЕАЛЬНЫХ живых данных (расход, статус, очередь) — не выдумывай их сам, выбери",
+      "соответствующий intent: бот сходит за настоящими данными и пришлёт их отдельным",
+      "сообщением, это и есть смысл JSON-метки ниже.",
       "",
       "Ответь СТРОГО одним JSON-объектом, без текста до/после и без markdown-разметки,",
       "одной из форм:",
@@ -544,16 +556,17 @@ export async function startBot(): Promise<void> {
       '{"intent":"peek"} — глянуть следующую задачу в очереди, не запуская',
       '{"intent":"kill"} — остановить/прервать текущую работу',
       '{"intent":"retry","key":"XEN-123"} — вернуть конкретный тикет (укажи ключ) в очередь',
-      '{"intent":"help"} — что бот умеет / как пользоваться',
-      '{"intent":"chat","reply":"..."} — ТОЛЬКО когда сообщение не про живые данные бота и не',
-      "  про одну из команд выше (обычный разговор, вопрос не по теме харнесса, благодарность",
-      "  и т.п.); reply — твой короткий полезный ответ на русском. Не выдумывай цифры бота",
-      "  здесь — если нужны именно они, это всегда status/budget/list/peek, а не chat.",
+      '{"intent":"help"} — что ты умеешь / как тобой пользоваться',
+      '{"intent":"chat","reply":"..."} — когда сообщение не про живые данные и не про одну из',
+      "  команд выше (обычный разговор, вопрос не по теме, благодарность и т.п.). reply —",
+      "  твой ответ ОТ СВОЕГО ЛИЦА: по-деловому, но по-человечески, коротко, на русском,",
+      "  без канцелярита и без фраз вроде «я бот/ассистент». Не выдумывай цифры бота здесь —",
+      "  если нужны именно они, это всегда status/budget/list/peek, а не chat.",
       "",
       'Сомневаешься между командой и chat — выбирай команду: худший случай — лишний,',
-      "но верный ответ, а не отказ там, где бот мог помочь.",
+      "но верный ответ, а не отказ там, где ты мог помочь.",
       "",
-      `Сообщение пользователя: "${text}"`,
+      `Сообщение CEO: "${text}"`,
     ].join("\n");
 
     const turn = await runClaudeTurn({
