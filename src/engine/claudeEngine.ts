@@ -2,6 +2,18 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import type { ClaudeTurnResult } from "../types.js";
 import { buildDisallowedTools } from "./guardrails.js";
+import { SECRET_ENV_VARS } from "../config.js";
+
+// Denylist, not allowlist: the `claude` CLI's own auth/config env surface (PATH, HOME,
+// proxy settings, NODE_OPTIONS, whatever it reads for login state) isn't fully known
+// to this file, and an allowlist risks silently breaking it. Stripping exactly the
+// harness's own secrets by name is the precise fix for the actual threat — the agent
+// reading them back out via Bash — without touching anything `claude` itself needs.
+export function buildAgentEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env = { ...source };
+  for (const key of SECRET_ENV_VARS) delete env[key];
+  return env;
+}
 
 interface RunClaudeTurnOptions {
   cwd: string;
@@ -86,7 +98,7 @@ export async function runClaudeTurn(opts: RunClaudeTurnOptions): Promise<ClaudeT
   let stderrText = "";
 
   await new Promise<void>((resolve, reject) => {
-    const child = spawn("claude", args, { cwd: opts.cwd });
+    const child = spawn("claude", args, { cwd: opts.cwd, env: buildAgentEnv() });
     currentChild = child;
 
     const rl = createInterface({ input: child.stdout });

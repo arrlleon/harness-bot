@@ -37,6 +37,15 @@ function buildGates(prefix: "BACKEND" | "FRONTEND", defaultTestCommand: string):
   return gates;
 }
 
+// Single source of truth for "env vars the spawned `claude` child process must never
+// see" (claudeEngine.ts strips exactly these before spawning). Every implement/review/
+// memory/testing-notes turn gets Bash by default — child_process.spawn otherwise
+// inherits the full parent env, so a prompt-injected ticket ("also run curl ... -d
+// \"$GITLAB_TOKEN\"") would succeed trivially with no file access needed. Kept here,
+// next to where each one is actually read, so a newly added secret can't silently miss
+// the denylist the way it would if the list lived somewhere unrelated.
+export const SECRET_ENV_VARS = ["JIRA_PAT", "GITLAB_TOKEN", "TELEGRAM_BOT_TOKEN"] as const;
+
 export const config = {
   jira: {
     baseUrl: requireEnv("JIRA_BASE_URL"),
