@@ -127,6 +127,11 @@ export const config = {
   gateIntegrityCheckEnabled: (process.env.GATE_INTEGRITY_CHECK_ENABLED ?? "true") !== "false",
   maxIterations: Number(process.env.MAX_ITERATIONS ?? 5),
   maxBudgetUsd: Number(process.env.MAX_BUDGET_USD ?? 5),
+  // A resumed session's answer quality degrades well before this many tokens would
+  // ever hit a real context-window limit — this is a quality safety net, not a window
+  // ceiling. 150k matches Avengers Harness's own starting value for the same check
+  // (same reasoning: min(40% of window, 150k), picked conservative over precise).
+  maxContextTokens: Number(process.env.CONTEXT_BUDGET_TOKENS ?? 150_000),
   dailyBudgetUsd: Number(process.env.DAILY_BUDGET_USD ?? 20),
   maxTasksPerDay: Number(process.env.MAX_TASKS_PER_DAY ?? 10),
   telegram: {

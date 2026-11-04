@@ -505,6 +505,7 @@ async function closeLoopAndPush(
       gates: repo.gates,
       maxIterations: config.maxIterations,
       maxBudgetUsd: config.maxBudgetUsd,
+      maxContextTokens: config.maxContextTokens,
       permissionMode: "acceptEdits",
       model: config.models.implement,
       acceptanceTest: config.acceptanceTestsEnabled
@@ -550,6 +551,8 @@ async function closeLoopAndPush(
       reason = `review_blocked: ${blocking.map((f) => f.description).join("; ")}`;
     } else if (result.stopReason === "gate_integrity_violation" && result.gateIntegrityViolations?.length) {
       reason = `gate_integrity_violation: ${result.gateIntegrityViolations.join("; ")}`;
+    } else if (result.stopReason === "context_budget" && result.contextTokens) {
+      reason = `context_budget: session reached ~${Math.round(result.contextTokens / 1000)}k tokens, stopped before quality degrades further`;
     }
     return { closeLoopResult: result, failureReason: reason, failureKind: "loop" };
   }

@@ -35,6 +35,11 @@ export interface EngineConfig {
   gates: GateSpec[];
   maxIterations: number;
   maxBudgetUsd: number;
+  // A resumed session's quality degrades well before the model's real context window
+  // fills — checked against input+cache_read+cache_creation tokens from the latest
+  // turn (the real total the model saw, not a per-turn delta). Absent/zero disables
+  // the check entirely.
+  maxContextTokens?: number;
   permissionMode: string;
   model?: string;
   extraDeniedPaths?: string[];
@@ -128,7 +133,15 @@ export interface CloseLoopResult {
   success: boolean;
   iterations: CloseLoopIteration[];
   totalCostUsd: number;
-  stopReason: "verified" | "max_iterations" | "max_budget" | "agent_error" | "stuck" | "review_blocked" | "gate_integrity_violation";
+  stopReason:
+    | "verified"
+    | "max_iterations"
+    | "max_budget"
+    | "context_budget"
+    | "agent_error"
+    | "stuck"
+    | "review_blocked"
+    | "gate_integrity_violation";
   worktreeDir: string;
   // Set only when stopReason is "stuck" — the gate(s) whose failure fingerprint
   // repeated identically across two consecutive iterations, for diagnostics in the
@@ -156,6 +169,10 @@ export interface CloseLoopResult {
   // config. Always routes to needs_human, never retried — unlike a normal gate
   // failure, giving the agent another attempt just risks it hiding this better.
   gateIntegrityViolations?: string[];
+  // Set only when stopReason is "context_budget" — the measured input+cache_read+
+  // cache_creation token count that tripped maxContextTokens, for the needs_human
+  // reason text.
+  contextTokens?: number;
 }
 
 export interface ReviewFinding {

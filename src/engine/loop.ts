@@ -1,4 +1,4 @@
-import type { CloseLoopIteration, CloseLoopResult, EngineConfig, GateSpec, ReviewFinding, TaskSpec } from "../types.js";
+import type { ClaudeTurnUsage, CloseLoopIteration, CloseLoopResult, EngineConfig, GateSpec, ReviewFinding, TaskSpec } from "../types.js";
 import { runClaudeTurn } from "./claudeEngine.js";
 import { establishBaselines, runGates } from "./verify.js";
 import { buildFeedbackPrompt, buildInitialPrompt } from "./prompts.js";
@@ -9,6 +9,14 @@ import { fingerprintFailure } from "./stuckDetector.js";
 import { reviewChanges } from "./review.js";
 import { generateTestingNotes } from "./testingNotes.js";
 import { checkGateIntegrity } from "./gateIntegrity.js";
+
+// input + cache_read + cache_creation is the real total context the model saw this
+// turn, not a per-turn delta — confirmed empirically elsewhere (a turn can report
+// input_tokens in the single digits while the real context is in the tens of
+// thousands, almost all of it served from cache).
+export function totalContextTokens(usage: ClaudeTurnUsage): number {
+  return usage.inputTokens + usage.cacheReadInputTokens + usage.cacheCreationInputTokens;
+}
 
 export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promise<CloseLoopResult> {
   const worktreeDir = config.existingWorktreeDir ?? (await createWorktree(config.repoPath, config.branchName));
@@ -179,6 +187,24 @@ export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promis
         memoryUpdated,
         reviewFindings,
         testingNotes,
+      };
+    }
+
+    // A resumed session's quality degrades well before this hits the model's hard
+    // window limit, and there is no proven-safe way yet to hand off to a fresh session
+    // mid-task without losing what the agent already knows — so this stops and asks a
+    // human, the same answer the loop already gives for max_iterations/max_budget/stuck.
+    const contextTokens = totalContextTokens(turn.usage);
+    if (config.maxContextTokens && contextTokens >= config.maxContextTokens) {
+      return {
+        task,
+        success: false,
+        iterations,
+        totalCostUsd,
+        stopReason: "context_budget",
+        worktreeDir,
+        acceptanceTestPath,
+        contextTokens,
       };
     }
 
