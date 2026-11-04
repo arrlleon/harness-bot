@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildReviewPrompt, parseReviewResponse } from "./review.js";
-import type { TaskSpec } from "../types.js";
+import { buildReviewPrompt, parseReviewResponse, buildReviewFixPrompt, formatReviewRound } from "./review.js";
+import type { ReviewFinding, TaskSpec } from "../types.js";
 
 const task: TaskSpec = {
   id: "XEN-55",
@@ -62,4 +62,36 @@ test("parseReviewResponse handles only blocking findings with no nonblocking sec
   const findings = parseReviewResponse(text);
   assert.equal(findings.length, 1);
   assert.equal(findings[0].blocking, true);
+});
+
+test("buildReviewFixPrompt lists every blocking finding and invites pushback", () => {
+  const blocking: ReviewFinding[] = [
+    { blocking: true, description: "src/x.ts:10 — SQL-инъекция" },
+    { blocking: true, description: "src/y.ts:5 — не обработан null" },
+  ];
+  const prompt = buildReviewFixPrompt(blocking);
+  assert.match(prompt, /SQL-инъекция/);
+  assert.match(prompt, /не обработан null/);
+  assert.match(prompt, /не игнорируй его молча/);
+});
+
+test("formatReviewRound reconstructs the БЛОКИРУЮЩИЕ/ЗАМЕЧАНИЯ shape from parsed findings", () => {
+  const findings: ReviewFinding[] = [
+    { blocking: true, description: "блокирующая проблема" },
+    { blocking: false, description: "просто замечание" },
+  ];
+  const text = formatReviewRound(findings, undefined);
+  assert.match(text, /БЛОКИРУЮЩИЕ:\n- блокирующая проблема/);
+  assert.match(text, /ЗАМЕЧАНИЯ:\n- просто замечание/);
+});
+
+test("formatReviewRound writes НЕТ for an empty section, not an empty list", () => {
+  const text = formatReviewRound([], undefined);
+  assert.match(text, /БЛОКИРУЮЩИЕ:\nНЕТ/);
+  assert.match(text, /ЗАМЕЧАНИЯ:\nНЕТ/);
+});
+
+test("formatReviewRound reports the turn's own failure reason instead of guessing at findings", () => {
+  const text = formatReviewRound([], "ход завершился ошибкой: timeout");
+  assert.match(text, /Ревью не удалось провести: ход завершился ошибкой: timeout/);
 });

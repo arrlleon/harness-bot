@@ -4,7 +4,7 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { runClaudeTurn } from "./claudeEngine.js";
 import { getWorktreeDiff } from "./git.js";
-import type { TaskSpec } from "../types.js";
+import type { AgentRole, TaskSpec } from "../types.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -12,30 +12,35 @@ const execFileAsync = promisify(execFile);
 // "don't touch X" warnings, pending threads — real, actively curated state). It's
 // NOT auto-loaded into every Claude Code session — only AGENTS.md is, via CLAUDE.md's
 // @-import — so without reading it explicitly, propose/implement would only see it if
-// the agent happened to read it unprompted. Read-only here, never written to.
+// the agent happened to read it unprompted. Read-only here, never written to. Shared
+// across roles on purpose — it's the team's single file, not jira-harness's to split.
 const TEAM_MEMORY_PATH = ".claude/memory/MEMORY.md";
 
-// jira-harness's own accumulated notes, in a separate file on purpose: never risk an
-// automated process rewriting a team's actively-curated MEMORY.md (front-ai's has its
-// own ≤30-line-index convention and real "не трогать" warnings — not something a bot
-// should be merging into unsupervised).
-export const HARNESS_MEMORY_PATH = ".claude/memory/jira-harness.md";
+// jira-harness's own accumulated notes — one file PER ROLE, not shared: the PM's notes
+// about how this project tends to scope tickets shouldn't bleed into what the reviewer
+// reads before judging a diff, and vice versa. Each role only ever reads its own file.
+// Separate from the team's MEMORY.md on purpose too: never risk an automated process
+// rewriting a team's actively-curated file (front-ai's has its own ≤30-line-index
+// convention and real "не трогать" warnings — not something a bot should touch).
+export function harnessMemoryPath(role: AgentRole): string {
+  return `.claude/memory/jira-harness/${role}.md`;
+}
 
 async function readIfExists(path: string): Promise<string | null> {
   return readFile(path, "utf8").catch(() => null);
 }
 
-export async function readMemoryFiles(repoPath: string): Promise<{ team: string | null; harness: string | null }> {
+export async function readMemoryFiles(repoPath: string, role: AgentRole): Promise<{ team: string | null; harness: string | null }> {
   const [team, harness] = await Promise.all([
     readIfExists(join(repoPath, TEAM_MEMORY_PATH)),
-    readIfExists(join(repoPath, HARNESS_MEMORY_PATH)),
+    readIfExists(join(repoPath, harnessMemoryPath(role))),
   ]);
   return { team, harness };
 }
 
 // Omits a section entirely when that file doesn't exist, rather than showing the
 // agent an empty block — most repos won't have a team memory file at all.
-export function buildMemoryContextBlock(memories: { team: string | null; harness: string | null }): string {
+export function buildMemoryContextBlock(memories: { team: string | null; harness: string | null }, role: AgentRole): string {
   const sections: string[] = [];
   if (memories.team) {
     sections.push(
@@ -44,9 +49,12 @@ export function buildMemoryContextBlock(memories: { team: string | null; harness
   }
   if (memories.harness) {
     sections.push(
-      ["Накопленные заметки jira-harness по прошлым задачам этого проекта:", "```markdown", memories.harness.trim(), "```"].join(
-        "\n",
-      ),
+      [
+        `Накопленные заметки jira-harness (роль: ${role}) по прошлым задачам этого проекта:`,
+        "```markdown",
+        memories.harness.trim(),
+        "```",
+      ].join("\n"),
     );
   }
   return sections.join("\n\n");
@@ -95,9 +103,10 @@ export interface MemoryUpdateOutcome {
 export async function updateProjectMemory(
   worktreeDir: string,
   task: TaskSpec,
-  opts: { model: string; baseBranch: string },
+  opts: { model: string; baseBranch: string; role: AgentRole },
 ): Promise<MemoryUpdateOutcome> {
-  const existing = await readIfExists(join(worktreeDir, HARNESS_MEMORY_PATH));
+  const relPath = harnessMemoryPath(opts.role);
+  const existing = await readIfExists(join(worktreeDir, relPath));
   const diffText = await getWorktreeDiff(worktreeDir, opts.baseBranch).catch(() => "");
 
   const turn = await runClaudeTurn({
@@ -118,13 +127,13 @@ export async function updateProjectMemory(
   }
 
   const newContent = match[1].trim() + "\n";
-  const absPath = join(worktreeDir, HARNESS_MEMORY_PATH);
+  const absPath = join(worktreeDir, relPath);
   await mkdir(dirname(absPath), { recursive: true });
   await writeFile(absPath, newContent);
-  await execFileAsync("git", ["add", HARNESS_MEMORY_PATH], { cwd: worktreeDir });
+  await execFileAsync("git", ["add", relPath], { cwd: worktreeDir });
   await execFileAsync(
     "git",
-    ["commit", "-m", `${task.id}: update jira-harness project memory\n\nAutomated by jira-harness.`],
+    ["commit", "-m", `${task.id}: update jira-harness project memory (${opts.role})\n\nAutomated by jira-harness.`],
     { cwd: worktreeDir },
   );
 

@@ -5,6 +5,13 @@ export interface TaskSpec {
   acceptanceCriteria: string[];
 }
 
+// Every turn is one of these — used both for per-role project memory
+// (.claude/memory/jira-harness/<role>.md) and per-task scratch
+// (.harness-state/tasks/<ISSUE-KEY>/<role>/). Deliberately a closed set, not a bare
+// string: a typo in a role name would silently start a new, orphaned memory file
+// nobody ever reads again.
+export type AgentRole = "pm" | "dev" | "reviewer";
+
 export interface GateSpec {
   name: string;
   command: string;
@@ -57,8 +64,12 @@ export interface EngineConfig {
   // attempted on success) — same opt-out shape as acceptanceTest.
   memory?: { model: string; baseBranch: string };
   // Absent disables independent review entirely (no extra turn, no review_blocked
-  // outcome possible) — same opt-out shape as acceptanceTest/memory.
-  review?: { model: string; baseBranch: string };
+  // outcome possible) — same opt-out shape as acceptanceTest/memory. maxRounds caps
+  // the reviewer<->developer back-and-forth (same session, review finds a blocking
+  // issue -> dev fixes it -> gates re-run -> review again) — required, not optional:
+  // an uncapped negotiation between two agents that might never agree has to have a
+  // hard stop, same reasoning as maxIterations for the gate-fixing loop.
+  review?: { model: string; baseBranch: string; maxRounds: number };
   // Absent disables the manual-testing-notes turn — same opt-out shape as
   // acceptanceTest/memory/review. Never blocks anything (unlike review): it's purely
   // informational output for a human tester, surfaced in the Jira success comment.
@@ -159,6 +170,11 @@ export interface CloseLoopResult {
   // same as any other failure); nonblocking findings ride along even on a real success,
   // for the MR description/Jira comment.
   reviewFindings?: ReviewFinding[];
+  // How many review<->fix rounds actually ran (1 if the reviewer was satisfied first
+  // try). Set whenever review ran at all, success or "review_blocked" — lets a human
+  // reading the needs_human reason see "it tried 3 rounds and gave up" instead of just
+  // the final round's findings with no sense of how much negotiation happened.
+  reviewRounds?: number;
   // Set whenever the testing-notes turn ran and produced non-empty output — a plain
   // Предусловия/Шаги/Ожидаемый результат write-up for a human tester, surfaced in the
   // Jira success comment. Absent if the turn was disabled, errored, or came back empty.

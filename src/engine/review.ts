@@ -69,6 +69,41 @@ export function parseReviewResponse(text: string): ReviewFinding[] {
   return [...blocking, ...nonblocking];
 }
 
+// What the developer turn sees when the reviewer found something blocking — same
+// session (resumeSessionId), so it already remembers the whole task; this only needs
+// to hand over what's new. Explicitly invites pushback rather than silent compliance —
+// "не додумывай и не игнорируй" is a prompt-level nudge, not a mechanical guarantee,
+// but asking the agent to say so when a finding looks wrong is strictly better than not
+// asking at all.
+export function buildReviewFixPrompt(blocking: ReviewFinding[]): string {
+  return [
+    "Независимый ревьюер проверил твои изменения и нашёл блокирующие проблемы.",
+    "Исправь именно их, не трогая остальное без необходимости:",
+    "",
+    ...blocking.map((f, i) => `${i + 1}. ${f.description}`),
+    "",
+    "Если какое-то замечание кажется ошибочным или смысл неясен — прямо напиши об этом",
+    "в ответе, а не игнорируй его молча и не додумывай за ревьюера.",
+  ].join("\n");
+}
+
+// Audit-trail format for .harness-state/tasks/<id>/reviewer/round-N.md — reconstructs
+// the review turn's own БЛОКИРУЮЩИЕ/ЗАМЕЧАНИЯ shape from the parsed findings, so a
+// human reading the file back sees the same thing the model itself saw and responded
+// to, round by round.
+export function formatReviewRound(findings: ReviewFinding[], reason: string | undefined): string {
+  if (reason) return `Ревью не удалось провести: ${reason}`;
+  const blocking = findings.filter((f) => f.blocking);
+  const nonblocking = findings.filter((f) => !f.blocking);
+  return [
+    "БЛОКИРУЮЩИЕ:",
+    blocking.length > 0 ? blocking.map((f) => `- ${f.description}`).join("\n") : "НЕТ",
+    "",
+    "ЗАМЕЧАНИЯ:",
+    nonblocking.length > 0 ? nonblocking.map((f) => `- ${f.description}`).join("\n") : "НЕТ",
+  ].join("\n");
+}
+
 // Read-only, same shape as propose/acceptance: runs in the already-committed worktree
 // (Edit/Write/Bash denied) so it can explore surrounding code for context, but can
 // never itself change anything — a reviewer that edits the thing it's reviewing isn't

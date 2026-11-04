@@ -119,6 +119,11 @@ export const config = {
   // needs_human flow instead of pushing — same mechanical "gates matter" principle,
   // just for the category of problem gates structurally can't catch.
   reviewEnabled: (process.env.REVIEW_ENABLED ?? "true") !== "false",
+  // Caps the reviewer<->developer negotiation (blocking finding -> dev fixes it in the
+  // same session -> gates re-run -> reviewer looks again). Two agents that disagree
+  // need a hard stop the same way MAX_ITERATIONS is one for the gate-fixing loop —
+  // otherwise a pair that never agrees just burns the whole task budget arguing.
+  maxReviewRounds: Number(process.env.MAX_REVIEW_ROUNDS ?? 3),
   // Same shape, same default. Purely informational (never blocks a push) — one more
   // read-only turn per successful task, same cost tier as review/memory.
   testingNotesEnabled: (process.env.TESTING_NOTES_ENABLED ?? "true") !== "false",

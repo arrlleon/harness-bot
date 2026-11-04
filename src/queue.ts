@@ -110,7 +110,7 @@ const declinedKeys = new Set<string>();
 // way Avengers Harness's frozen-acceptance-tests idea does, just without a separate
 // executable-test layer.
 async function proposeSolution(task: TaskSpec, repoPath: string): Promise<{ plan: string; acceptanceCriteria: string[]; costUsd: number }> {
-  const memoryContext = buildMemoryContextBlock(await readMemoryFiles(repoPath));
+  const memoryContext = buildMemoryContextBlock(await readMemoryFiles(repoPath, "pm"), "pm");
   const prompt = [
     `Задача ${task.id}: ${task.title}`,
     "",
@@ -530,7 +530,9 @@ async function closeLoopAndPush(
       ? { model: config.models.acceptance, runner: repo.acceptanceRunner, ext: repo.acceptanceTestExt }
       : undefined,
     memory: config.memoryEnabled ? { model: config.models.memory, baseBranch: config.gitlab.targetBranch } : undefined,
-    review: config.reviewEnabled ? { model: config.models.review, baseBranch: config.gitlab.targetBranch } : undefined,
+    review: config.reviewEnabled
+      ? { model: config.models.review, baseBranch: config.gitlab.targetBranch, maxRounds: config.maxReviewRounds }
+      : undefined,
     testingNotes: config.testingNotesEnabled
       ? { model: config.models.testing, baseBranch: config.gitlab.targetBranch }
       : undefined,
@@ -552,7 +554,8 @@ async function closeLoopAndPush(
       reason = `stuck (same failure repeated in: ${result.stuckGates.join(", ")})`;
     } else if (result.stopReason === "review_blocked" && result.reviewFindings?.length) {
       const blocking = result.reviewFindings.filter((f) => f.blocking);
-      reason = `review_blocked: ${blocking.map((f) => f.description).join("; ")}`;
+      const rounds = result.reviewRounds ? ` после ${result.reviewRounds} раунд(ов) с разработчиком` : "";
+      reason = `review_blocked${rounds}: ${blocking.map((f) => f.description).join("; ")}`;
     } else if (result.stopReason === "gate_integrity_violation" && result.gateIntegrityViolations?.length) {
       reason = `gate_integrity_violation: ${result.gateIntegrityViolations.join("; ")}`;
     } else if (result.stopReason === "context_budget" && result.contextTokens) {

@@ -6,9 +6,10 @@ import { createWorktree, commitAll } from "./git.js";
 import { writeAcceptanceTest } from "./acceptanceTest.js";
 import { readMemoryFiles, buildMemoryContextBlock, updateProjectMemory } from "./memory.js";
 import { fingerprintFailure } from "./stuckDetector.js";
-import { reviewChanges } from "./review.js";
+import { reviewChanges, buildReviewFixPrompt, formatReviewRound } from "./review.js";
 import { generateTestingNotes } from "./testingNotes.js";
 import { checkGateIntegrity } from "./gateIntegrity.js";
+import { writeTaskContext } from "./agentContext.js";
 
 // input + cache_read + cache_creation is the real total context the model saw this
 // turn, not a per-turn delta — confirmed empirically elsewhere (a turn can report
@@ -62,8 +63,9 @@ export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promis
 
   // Read-only context, injected directly rather than left for the agent to stumble
   // onto — the project's own CLAUDE.md only auto-loads AGENTS.md, not memory files.
-  const memories = await readMemoryFiles(config.repoPath);
-  const memoryContext = buildMemoryContextBlock(memories);
+  // "dev" — this is the implement role's own memory, separate from pm's/reviewer's.
+  const memories = await readMemoryFiles(config.repoPath, "dev");
+  const memoryContext = buildMemoryContextBlock(memories, "dev");
 
   const iterations: CloseLoopIteration[] = [];
   let prompt = buildInitialPrompt(task, memoryContext);
@@ -133,26 +135,102 @@ export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promis
 
       // Review runs on every real success, before memory — a change a human ends up
       // rejecting shouldn't also leave a "durable fact" behind as if it shipped clean.
+      //
+      // A blocking finding doesn't go straight to a human anymore: it's handed back to
+      // the SAME implement session (resumeSessionId, so it remembers what it already
+      // did) as a fix request, gates re-run, reviewer looks again — same loop shape as
+      // gate feedback, just with the reviewer in place of a failing gate. Capped at
+      // config.review.maxRounds: two agents negotiating with each other need a hard
+      // stop the same way maxIterations is one for the gate-fixing loop, or a pair that
+      // never agrees burns the whole budget arguing. Every round is written to
+      // .harness-state/tasks/<task.id>/{reviewer,dev}/ — a human reading the eventual
+      // needs_human case sees the actual back-and-forth, not just the final verdict.
       let reviewFindings: ReviewFinding[] | undefined;
+      let reviewRounds = 0;
       if (config.review) {
-        config.onIteration?.({ iteration: i + 1, phase: "reviewing", costUsd: totalCostUsd, summary: "Ревьюю изменения" });
-        const reviewResult = await reviewChanges(worktreeDir, task, config.review);
-        totalCostUsd += reviewResult.costUsd;
-        reviewFindings = reviewResult.findings;
-        if (reviewResult.reason) config.onLog?.(`⚠️ Не удалось провести ревью (${reviewResult.reason})`);
+        for (let round = 1; round <= config.review.maxRounds; round++) {
+          reviewRounds = round;
+          config.onIteration?.({
+            iteration: i + 1,
+            phase: "reviewing",
+            costUsd: totalCostUsd,
+            summary: `Ревьюю изменения (раунд ${round}/${config.review.maxRounds})`,
+          });
+          const reviewResult = await reviewChanges(worktreeDir, task, config.review);
+          totalCostUsd += reviewResult.costUsd;
+          reviewFindings = reviewResult.findings;
+          if (reviewResult.reason) config.onLog?.(`⚠️ Не удалось провести ревью (${reviewResult.reason})`);
+          writeTaskContext(task.id, "reviewer", `round-${round}.md`, formatReviewRound(reviewFindings, reviewResult.reason));
 
-        const blocking = reviewFindings.filter((f) => f.blocking);
-        if (blocking.length > 0) {
-          return {
-            task,
-            success: false,
-            iterations,
-            totalCostUsd,
-            stopReason: "review_blocked",
-            worktreeDir,
-            acceptanceTestPath,
-            reviewFindings,
-          };
+          const blocking = reviewFindings.filter((f) => f.blocking);
+          if (blocking.length === 0) break; // ревьюер доволен
+
+          if (round === config.review.maxRounds) {
+            return {
+              task,
+              success: false,
+              iterations,
+              totalCostUsd,
+              stopReason: "review_blocked",
+              worktreeDir,
+              acceptanceTestPath,
+              reviewFindings,
+              reviewRounds,
+            };
+          }
+
+          const remainingBudget = config.maxBudgetUsd - totalCostUsd;
+          if (remainingBudget <= 0) {
+            return { task, success: false, iterations, totalCostUsd, stopReason: "max_budget", worktreeDir, acceptanceTestPath };
+          }
+
+          config.onIteration?.({
+            iteration: i + 1,
+            phase: "iterating",
+            costUsd: totalCostUsd,
+            summary: `Правлю по замечаниям ревьюера (раунд ${round})`,
+          });
+          const fixTurn = await runClaudeTurn({
+            cwd: worktreeDir,
+            prompt: buildReviewFixPrompt(blocking),
+            permissionMode: config.permissionMode,
+            resumeSessionId,
+            maxBudgetUsd: remainingBudget,
+            extraDeniedPaths,
+            model: config.model,
+            onLog: config.onLog,
+          });
+          totalCostUsd += fixTurn.totalCostUsd;
+          resumeSessionId = fixTurn.sessionId;
+          writeTaskContext(task.id, "dev", `round-${round}-response.md`, fixTurn.resultText);
+
+          if (fixTurn.isError) {
+            iterations.push({ turn: fixTurn, verify: { passed: false, output: fixTurn.resultText, gates: [] } });
+            return { task, success: false, iterations, totalCostUsd, stopReason: "agent_error", worktreeDir, acceptanceTestPath };
+          }
+
+          const fixVerify = await runGates(worktreeDir, gates, baselines);
+          iterations.push({ turn: fixTurn, verify: fixVerify });
+          if (!fixVerify.passed) {
+            // The review-fix attempt broke a gate — rather than nest a whole second
+            // gate-fixing loop inside the review loop, stop here with a clear reason;
+            // a human has more context to judge this than another blind retry would.
+            return {
+              task,
+              success: false,
+              iterations,
+              totalCostUsd,
+              stopReason: "review_blocked",
+              worktreeDir,
+              acceptanceTestPath,
+              reviewFindings: [
+                ...blocking,
+                { blocking: true, description: "правка по замечаниям ревью сломала гейты — см. последнюю итерацию" },
+              ],
+              reviewRounds,
+            };
+          }
+          await commitAll(worktreeDir, `${task.id}: fix review round ${round}\n\nAutomated by jira-harness.`);
         }
       }
 
@@ -170,7 +248,7 @@ export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promis
       let memoryUpdated = false;
       if (config.memory) {
         config.onIteration?.({ iteration: i + 1, phase: "updating_memory", costUsd: totalCostUsd, summary: "Обновляю project memory" });
-        const memResult = await updateProjectMemory(worktreeDir, task, config.memory);
+        const memResult = await updateProjectMemory(worktreeDir, task, { ...config.memory, role: "dev" });
         totalCostUsd += memResult.costUsd;
         memoryUpdated = memResult.updated;
         if (memResult.reason) config.onLog?.(`⚠️ Не удалось обновить project memory (${memResult.reason})`);
@@ -186,6 +264,7 @@ export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promis
         acceptanceTestPath,
         memoryUpdated,
         reviewFindings,
+        reviewRounds: config.review ? reviewRounds : undefined,
         testingNotes,
       };
     }

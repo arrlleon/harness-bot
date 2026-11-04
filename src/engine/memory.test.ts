@@ -11,24 +11,31 @@ const task: TaskSpec = {
 };
 
 test("buildMemoryContextBlock omits a section entirely when that memory file doesn't exist", () => {
-  const onlyHarness = buildMemoryContextBlock({ team: null, harness: "# notes\n- a fact" });
+  const onlyHarness = buildMemoryContextBlock({ team: null, harness: "# notes\n- a fact" }, "dev");
   assert.doesNotMatch(onlyHarness, /Memory команды проекта/);
   assert.match(onlyHarness, /Накопленные заметки jira-harness/);
   assert.match(onlyHarness, /- a fact/);
 
-  const onlyTeam = buildMemoryContextBlock({ team: "# team notes", harness: null });
+  const onlyTeam = buildMemoryContextBlock({ team: "# team notes", harness: null }, "dev");
   assert.match(onlyTeam, /Memory команды проекта/);
   assert.doesNotMatch(onlyTeam, /Накопленные заметки jira-harness/);
 });
 
 test("buildMemoryContextBlock returns an empty string when neither file exists", () => {
-  assert.equal(buildMemoryContextBlock({ team: null, harness: null }), "");
+  assert.equal(buildMemoryContextBlock({ team: null, harness: null }, "dev"), "");
 });
 
 test("buildMemoryContextBlock includes both sections when both files exist", () => {
-  const block = buildMemoryContextBlock({ team: "team stuff", harness: "harness stuff" });
+  const block = buildMemoryContextBlock({ team: "team stuff", harness: "harness stuff" }, "dev");
   assert.match(block, /team stuff/);
   assert.match(block, /harness stuff/);
+});
+
+test("buildMemoryContextBlock labels the harness section with the role, so pm/dev/reviewer notes aren't confused", () => {
+  const pmBlock = buildMemoryContextBlock({ team: null, harness: "pm notes" }, "pm");
+  assert.match(pmBlock, /роль: pm/);
+  const reviewerBlock = buildMemoryContextBlock({ team: null, harness: "reviewer notes" }, "reviewer");
+  assert.match(reviewerBlock, /роль: reviewer/);
 });
 
 test("buildMemoryUpdatePrompt includes the task, the diff, and the existing memory content", () => {
