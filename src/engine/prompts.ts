@@ -1,10 +1,11 @@
 import type { GateResult, TaskSpec } from "../types.js";
+import { buildBriefInstructions } from "./brief.js";
 
 // memoryContext (from engine/memory.ts) is injected directly rather than left for the
 // agent to discover on its own — it's not auto-loaded by the project's own CLAUDE.md
 // (only AGENTS.md is), so without this the agent would only see it if it happened to
 // read those files unprompted.
-export function buildInitialPrompt(task: TaskSpec, memoryContext = ""): string {
+export function buildInitialPrompt(task: TaskSpec, memoryContext = "", briefsEnabled = true): string {
   const criteria = task.acceptanceCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n");
   return [
     `Task ${task.id}: ${task.title}`,
@@ -18,6 +19,7 @@ export function buildInitialPrompt(task: TaskSpec, memoryContext = ""): string {
     "Follow the project's existing conventions. You do not have shell access in",
     "this session and should not attempt to run commands; a separate process",
     "will run tests and commit your changes. Stop once the files are correct.",
+    briefsEnabled ? `\n${buildBriefInstructions()}` : "",
   ].join("\n");
 }
 

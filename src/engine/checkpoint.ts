@@ -72,10 +72,14 @@ export function recoverOrphanedCheckpoints(): RecoveredCheckpoint[] {
   const recovered: RecoveredCheckpoint[] = [];
   for (const cp of listCheckpoints()) {
     const live = getLiveState();
-    // Don't clobber a pendingApproval/pendingHumanReview that's already in place for
-    // this exact issue (e.g. the checkpoint is stale from an older, already-resolved
-    // run) — leave it for a human to sort out rather than guess.
-    if (live.pendingApproval?.issueKey === cp.issueKey || live.pendingHumanReview?.issueKey === cp.issueKey) {
+    // Don't clobber a pendingApproval/pendingHumanReview/pendingBrief that's already in
+    // place for this exact issue (e.g. the checkpoint is stale from an older, already-
+    // resolved run) — leave it for a human to sort out rather than guess.
+    if (
+      live.pendingApproval?.issueKey === cp.issueKey ||
+      live.pendingHumanReview?.issueKey === cp.issueKey ||
+      live.pendingBrief?.issueKey === cp.issueKey
+    ) {
       continue;
     }
     const reason = describeCheckpoint(cp);

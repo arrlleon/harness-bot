@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CostEstimate } from "./state.js";
+import type { Brief, CloseLoopResumeState, TaskSpec } from "../types.js";
 
 // Overridable so tests (and checkpoint.ts, which shares this directory) can point at a
 // throwaway location instead of ever touching the real bot's persisted state on disk.
@@ -70,47 +71,77 @@ export interface PendingHumanReview {
   gitlabProjectPath: string;
 }
 
+// A brief the implement turn raised instead of guessing — paused mid-task, not failed:
+// resolving it (queue.ts's resolveBrief) resumes the exact same claude session with
+// the chosen option woven into the next prompt. See CloseLoopResumeState (types.ts)
+// for why the resume state can't just be "run the task again from scratch".
+export interface PendingBrief {
+  issueKey: string;
+  title: string;
+  task: TaskSpec;
+  brief: Brief;
+  worktreeDir: string;
+  branchName: string;
+  gitlabProjectPath: string;
+  resumeState: CloseLoopResumeState;
+}
+
 export interface LiveState {
   botRunning: boolean;
   currentJob: LiveJob | null;
   pendingApproval: PendingApproval | null;
   pendingHumanReview: PendingHumanReview | null;
+  pendingBrief: PendingBrief | null;
 }
 
-const state: LiveState = { botRunning: false, currentJob: null, pendingApproval: null, pendingHumanReview: null };
+const state: LiveState = {
+  botRunning: false,
+  currentJob: null,
+  pendingApproval: null,
+  pendingHumanReview: null,
+  pendingBrief: null,
+};
 
 // currentJob isn't persisted: it tracks a live `claude` child process, which a restart
-// kills regardless — there's nothing meaningful to resume it from. pendingApproval and
-// pendingHumanReview are pure data with no running process behind them (the analysis
-// turn, or the close loop, already finished) — losing those to a restart was a real
-// problem (XEN-364: a verified, pushed fix sitting one click from an MR, with nothing
-// in the bot's memory to say so) and there's no reason they can't survive one.
+// kills regardless — there's nothing meaningful to resume it from. pendingApproval,
+// pendingHumanReview, and pendingBrief are pure data with no running process behind
+// them (the analysis turn, or the close loop, already finished/paused) — losing those
+// to a restart was a real problem (XEN-364: a verified, pushed fix sitting one click
+// from an MR, with nothing in the bot's memory to say so) and there's no reason they
+// can't survive one.
 interface PersistedPending {
   pendingApproval: PendingApproval | null;
   pendingHumanReview: PendingHumanReview | null;
+  pendingBrief: PendingBrief | null;
 }
 
 const PENDING_STATE_PATH = join(HARNESS_STATE_DIR, "pending-state.json");
 
 function persistPending(): void {
-  const payload: PersistedPending = { pendingApproval: state.pendingApproval, pendingHumanReview: state.pendingHumanReview };
+  const payload: PersistedPending = {
+    pendingApproval: state.pendingApproval,
+    pendingHumanReview: state.pendingHumanReview,
+    pendingBrief: state.pendingBrief,
+  };
   mkdirSync(dirname(PENDING_STATE_PATH), { recursive: true });
   writeFileSync(PENDING_STATE_PATH, JSON.stringify(payload, null, 2));
 }
 
 // Called once at bot startup, before any command can run, so a restored
-// pendingApproval/pendingHumanReview is in place before /status or a stale button
-// click could see a wrong "nothing pending" answer.
+// pendingApproval/pendingHumanReview/pendingBrief is in place before /status or a
+// stale button click could see a wrong "nothing pending" answer.
 export function loadPersistedPending(): PersistedPending {
-  if (!existsSync(PENDING_STATE_PATH)) return { pendingApproval: null, pendingHumanReview: null };
+  const empty: PersistedPending = { pendingApproval: null, pendingHumanReview: null, pendingBrief: null };
+  if (!existsSync(PENDING_STATE_PATH)) return empty;
   try {
     const parsed = JSON.parse(readFileSync(PENDING_STATE_PATH, "utf8")) as Partial<PersistedPending>;
     state.pendingApproval = parsed.pendingApproval ?? null;
     state.pendingHumanReview = parsed.pendingHumanReview ?? null;
+    state.pendingBrief = parsed.pendingBrief ?? null;
   } catch {
     // Corrupt or half-written file — start clean rather than crash the bot over it.
   }
-  return { pendingApproval: state.pendingApproval, pendingHumanReview: state.pendingHumanReview };
+  return { pendingApproval: state.pendingApproval, pendingHumanReview: state.pendingHumanReview, pendingBrief: state.pendingBrief };
 }
 
 export function setPendingApproval(p: PendingApproval): void {
@@ -130,6 +161,16 @@ export function setPendingHumanReview(p: PendingHumanReview): void {
 
 export function clearPendingHumanReview(): void {
   state.pendingHumanReview = null;
+  persistPending();
+}
+
+export function setPendingBrief(p: PendingBrief): void {
+  state.pendingBrief = p;
+  persistPending();
+}
+
+export function clearPendingBrief(): void {
+  state.pendingBrief = null;
   persistPending();
 }
 

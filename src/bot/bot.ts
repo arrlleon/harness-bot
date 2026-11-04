@@ -13,11 +13,12 @@ import {
   proposeIssueByKey,
   getPendingHumanReviewDiff,
   resolveHumanReview,
+  resolveBrief,
   type Proposal,
   type Candidate,
 } from "../queue.js";
 import { killCurrentTurn, runClaudeTurn } from "../engine/claudeEngine.js";
-import type { QueueRunOutcome } from "../types.js";
+import type { QueueRunOutcome, Brief } from "../types.js";
 
 const REPO_RU: Record<string, string> = { backend: "бэкенд", frontend: "фронтенд", cross: "кросс-репо (бэкенд → фронтенд)" };
 
@@ -43,6 +44,7 @@ const HELP_TEXT = [
   "/peek — покажу следующий тикет в очереди, не запуская его",
   "/retry XEN-123 — верну тикет, застрявший в «нужен человек», обратно в очередь",
   "«нужен человек» — сразу присылаю diff с кнопками ✅ Принять/❌ Отклонить: можно запушить уже сделанную работу вручную, даже если сам я сдался",
+  "брифы — если разработчику что-то реально неясно, не додумывает: присылаю вопрос с вариантами, выбираешь кнопкой, он продолжает с тем же контекстом",
   "/dashboard — ссылка на живой локальный дашборд",
   "/help — это сообщение",
   "",
@@ -56,6 +58,10 @@ function describeOutcome(outcome: QueueRunOutcome | { kind: "error"; message: st
     case "paused":
       return `⏸ Приостановился: ${outcome.reason}`;
     case "busy":
+      return null;
+    case "brief_pending":
+      // Handled separately (sendBrief, with option buttons) — never through this
+      // plain-text path.
       return null;
     case "skipped":
       return `⏭ Пропустил ${outcome.issueKey} (${outcome.reason})`;
@@ -128,6 +134,29 @@ function formatProposal(p: Proposal): string {
   ];
 
   return [header, "", expandableBlockquote(bodyLines)].join("\n");
+}
+
+// Modeled on ETS Tender's own production "брифы": a structured question with concrete
+// options the human answers with one click, not free text the harness would have to
+// interpret. ★ marks the agent's own recommendation, same as their deck shows it.
+function formatBrief(issueKey: string, brief: Brief): string {
+  const lines = [
+    `❓ Вопрос по ${issueKey}:`,
+    brief.question,
+    "",
+    ...brief.options.map((o, i) => `${i + 1}. ${o.label}${brief.recommendedIndex === i ? " ★" : ""}`),
+  ];
+  if (brief.rationale) lines.push("", `Почему так: ${brief.rationale}`);
+  return lines.join("\n");
+}
+
+function briefKeyboard(issueKey: string, brief: Brief): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  brief.options.forEach((o, i) => {
+    const label = brief.recommendedIndex === i ? `★ ${i + 1}. ${o.label}` : `${i + 1}. ${o.label}`;
+    keyboard.text(label.slice(0, 64), `brief_answer:${issueKey}:${i}`).row();
+  });
+  return keyboard;
 }
 
 const MAX_DIFF_CHARS = 3200; // Telegram's 4096 message cap minus room for the header/buttons text
@@ -207,6 +236,12 @@ export async function startBot(): Promise<void> {
       (text, keyboard) => announce("🔄 Восстановлено после перезапуска:\n\n" + text, keyboard),
       { issueKey: p.issueKey, reason: p.reason, costUsd: p.costUsd },
     ).catch(() => {});
+  }
+  if (restored.pendingBrief) {
+    const p = restored.pendingBrief;
+    announce("🔄 Восстановлено после перезапуска:\n\n" + formatBrief(p.issueKey, p.brief), briefKeyboard(p.issueKey, p.brief)).catch(
+      () => {},
+    );
   }
 
   // A checkpoint left on disk means the process died mid-iteration last run (not a
@@ -404,13 +439,14 @@ export async function startBot(): Promise<void> {
 
   async function handleStatus(ctx: Context): Promise<void> {
     const last = state.history.at(-1);
-    const pending = getLiveState().pendingApproval;
+    const live = getLiveState();
+    const waitingOn = live.pendingApproval?.issueKey ?? live.pendingHumanReview?.issueKey ?? live.pendingBrief?.issueKey;
     const lines = [
       `${state.running ? "🟢" : "⚪️"} ${state.running ? "работаю" : "не запущен"}`,
       `💰 всего потратил: $${totalCostUsd(state).toFixed(4)}`,
       `сегодня: $${costSince(state, startOfTodayIso()).toFixed(4)}`,
       `📈 задач обработал: ${state.history.length}`,
-      pending ? `⏳ жду твоего решения по: ${pending.issueKey}` : "⏳ ничего не жду от тебя сейчас",
+      waitingOn ? `⏳ жду твоего решения по: ${waitingOn}` : "⏳ ничего не жду от тебя сейчас",
       last ? `последнее: ${last.issueKey} (${last.outcome}) — ${last.detail}` : "последнее: пока ничего",
     ];
     await ctx.reply(lines.join("\n"));
@@ -434,6 +470,12 @@ export async function startBot(): Promise<void> {
         recordOutcome(state, outcome);
         if (outcome.kind === "needs_human") {
           await sendNeedsHumanReview((text, keyboard) => ctx.reply(text, keyboard ? { reply_markup: keyboard } : undefined), outcome);
+        } else if (outcome.kind === "brief_pending") {
+          // The task is paused, not finished — don't show the ticket menu below until
+          // this is answered (resolveBrief itself re-announces the next step).
+          const pending = getLiveState().pendingBrief;
+          if (pending) await ctx.reply(formatBrief(pending.issueKey, pending.brief), { reply_markup: briefKeyboard(pending.issueKey, pending.brief) });
+          return;
         } else {
           const text = describeOutcome(outcome);
           if (text) await ctx.reply(text);
@@ -506,6 +548,39 @@ export async function startBot(): Promise<void> {
     resolveHumanReview(false)
       .then(() => sendTicketMenu(ctx, "Что дальше?"))
       .catch((err: Error) => ctx.reply(`❌ ${key}: не удалось отклонить — ${err.message}`));
+  });
+
+  bot.callbackQuery(/^brief_answer:([^:]+):(\d+)$/, async (ctx) => {
+    const key = ctx.match[1];
+    const chosenIndex = Number(ctx.match[2]);
+    const pending = getLiveState().pendingBrief;
+    if (!pending || pending.issueKey !== key) {
+      await ctx.answerCallbackQuery({ text: "Это уже неактуально.", show_alert: true });
+      return;
+    }
+    const chosenLabel = pending.brief.options[chosenIndex]?.label ?? `вариант ${chosenIndex + 1}`;
+    await ctx.answerCallbackQuery({ text: "Продолжаю…" });
+    const original = ctx.callbackQuery.message?.text ?? `${key}`;
+    await ctx.editMessageText(original + `\n\n✅ Выбрано: ${chosenLabel}. Продолжаю работу… 🛠️`).catch(() => {});
+
+    resolveBrief(chosenIndex)
+      .then(async (outcome) => {
+        if (!outcome) return;
+        recordOutcome(state, outcome);
+        if (outcome.kind === "needs_human") {
+          await sendNeedsHumanReview((text, keyboard) => ctx.reply(text, keyboard ? { reply_markup: keyboard } : undefined), outcome);
+        } else if (outcome.kind === "brief_pending") {
+          // Resumed, but the agent had ANOTHER question — same handling as the first.
+          const next = getLiveState().pendingBrief;
+          if (next) await ctx.reply(formatBrief(next.issueKey, next.brief), { reply_markup: briefKeyboard(next.issueKey, next.brief) });
+          return;
+        } else {
+          const text = describeOutcome(outcome);
+          if (text) await ctx.reply(text);
+        }
+        await sendTicketMenu(ctx, "Что дальше?");
+      })
+      .catch((err: Error) => ctx.reply(`❌ ${key}: не удалось продолжить — ${err.message}`));
   });
 
   // Free-form chat: anything that isn't a recognized slash command. A tiny Claude turn

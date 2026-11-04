@@ -1,4 +1,13 @@
-import type { ClaudeTurnUsage, CloseLoopIteration, CloseLoopResult, EngineConfig, GateSpec, ReviewFinding, TaskSpec } from "../types.js";
+import type {
+  ClaudeTurnUsage,
+  CloseLoopIteration,
+  CloseLoopResult,
+  EngineConfig,
+  GateBaseline,
+  GateSpec,
+  ReviewFinding,
+  TaskSpec,
+} from "../types.js";
 import { runClaudeTurn } from "./claudeEngine.js";
 import { establishBaselines, runGates } from "./verify.js";
 import { buildFeedbackPrompt, buildInitialPrompt } from "./prompts.js";
@@ -10,6 +19,7 @@ import { reviewChanges, buildReviewFixPrompt, formatReviewRound } from "./review
 import { generateTestingNotes } from "./testingNotes.js";
 import { checkGateIntegrity } from "./gateIntegrity.js";
 import { writeTaskContext } from "./agentContext.js";
+import { parseBrief } from "./brief.js";
 
 // input + cache_read + cache_creation is the real total context the model saw this
 // turn, not a per-turn delta — confirmed empirically elsewhere (a turn can report
@@ -22,60 +32,84 @@ export function totalContextTokens(usage: ClaudeTurnUsage): number {
 export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promise<CloseLoopResult> {
   const worktreeDir = config.existingWorktreeDir ?? (await createWorktree(config.repoPath, config.branchName));
 
-  let totalCostUsd = 0;
-  let gates: GateSpec[] = config.gates;
-  let extraDeniedPaths = config.extraDeniedPaths;
+  let totalCostUsd: number;
+  let gates: GateSpec[];
+  let extraDeniedPaths: string[] | undefined;
   let acceptanceTestPath: string | undefined;
-
-  // Writing the acceptance test is a one-shot step, before any implementation work —
-  // the test has to capture "before the fix" (expected to fail) honestly, and only
-  // this ordering lets implement be mechanically denied Edit/Write on its exact path
-  // for the rest of the loop (see extraDeniedPaths below). A write that goes wrong
-  // (model errors, or touches more than its one file) degrades to "no acceptance
-  // gate" rather than failing the whole task over a meta-step.
-  if (task.acceptanceCriteria.length > 0 && config.acceptanceTest) {
-    config.onIteration?.({
-      iteration: 0,
-      phase: "writing_acceptance_test",
-      costUsd: 0,
-      summary: `Пишу тест приёмки по ${task.acceptanceCriteria.length} критериям`,
-    });
-    const result = await writeAcceptanceTest(worktreeDir, task, {
-      model: config.acceptanceTest.model,
-      ext: config.acceptanceTest.ext,
-      extraDeniedPaths: config.extraDeniedPaths,
-    });
-    totalCostUsd += result.costUsd;
-    if (result.ok) {
-      acceptanceTestPath = result.relPath;
-      gates = [...config.gates, { name: "acceptance", command: `${config.acceptanceTest.runner} ${result.relPath}`, strict: true }];
-      extraDeniedPaths = [...(config.extraDeniedPaths ?? []), result.relPath];
-    } else {
-      config.onLog?.(`⚠️ Не удалось зафиксировать тест приёмки (${result.reason}) — продолжаю без него.`);
-    }
-  }
-
-  // Can take minutes on a real test suite — say so up front, same reasoning as the
-  // analyzing-turn message: a long silent gap here reads as "stuck", not "working".
-  const gateNames = gates.map((g) => g.name).join(", ");
-  config.onIteration?.({ iteration: 0, phase: "baseline", costUsd: totalCostUsd, summary: `Считаю baseline по гейтам: ${gateNames}` });
-  const baselines = await establishBaselines(worktreeDir, gates);
-
-  // Read-only context, injected directly rather than left for the agent to stumble
-  // onto — the project's own CLAUDE.md only auto-loads AGENTS.md, not memory files.
-  // "dev" — this is the implement role's own memory, separate from pm's/reviewer's.
-  const memories = await readMemoryFiles(config.repoPath, "dev");
-  const memoryContext = buildMemoryContextBlock(memories, "dev");
-
-  const iterations: CloseLoopIteration[] = [];
-  let prompt = buildInitialPrompt(task, memoryContext);
+  let baselines: GateBaseline[];
+  let prompt: string;
   let resumeSessionId: string | undefined;
   // Set once a failure happens, compared against the NEXT failure — not the error
   // itself but whether the agent's last edit changed anything about its *nature*.
   // Needs two failed iterations to ever trigger, so a single bad attempt never does.
   let previousFingerprint: string | undefined;
+  let startIteration: number;
 
-  for (let i = 0; i < config.maxIterations; i++) {
+  if (config.resumeFrom) {
+    // Resuming after a human answered a brief (see parseBrief below) — everything in
+    // the `else` branch already ran before the pause. Redoing it would re-establish
+    // baselines against a worktree that already has partial work in it (wrong) and
+    // risk writing a second, conflicting acceptance test.
+    totalCostUsd = config.resumeFrom.totalCostUsd;
+    gates = config.resumeFrom.gates;
+    extraDeniedPaths = config.resumeFrom.extraDeniedPaths;
+    acceptanceTestPath = config.resumeFrom.acceptanceTestPath;
+    baselines = config.resumeFrom.baselines;
+    prompt = config.resumeFrom.prompt;
+    resumeSessionId = config.resumeFrom.sessionId;
+    previousFingerprint = config.resumeFrom.previousFingerprint;
+    startIteration = config.resumeFrom.iteration;
+  } else {
+    totalCostUsd = 0;
+    gates = config.gates;
+    extraDeniedPaths = config.extraDeniedPaths;
+
+    // Writing the acceptance test is a one-shot step, before any implementation work —
+    // the test has to capture "before the fix" (expected to fail) honestly, and only
+    // this ordering lets implement be mechanically denied Edit/Write on its exact path
+    // for the rest of the loop (see extraDeniedPaths below). A write that goes wrong
+    // (model errors, or touches more than its one file) degrades to "no acceptance
+    // gate" rather than failing the whole task over a meta-step.
+    if (task.acceptanceCriteria.length > 0 && config.acceptanceTest) {
+      config.onIteration?.({
+        iteration: 0,
+        phase: "writing_acceptance_test",
+        costUsd: 0,
+        summary: `Пишу тест приёмки по ${task.acceptanceCriteria.length} критериям`,
+      });
+      const result = await writeAcceptanceTest(worktreeDir, task, {
+        model: config.acceptanceTest.model,
+        ext: config.acceptanceTest.ext,
+        extraDeniedPaths: config.extraDeniedPaths,
+      });
+      totalCostUsd += result.costUsd;
+      if (result.ok) {
+        acceptanceTestPath = result.relPath;
+        gates = [...config.gates, { name: "acceptance", command: `${config.acceptanceTest.runner} ${result.relPath}`, strict: true }];
+        extraDeniedPaths = [...(config.extraDeniedPaths ?? []), result.relPath];
+      } else {
+        config.onLog?.(`⚠️ Не удалось зафиксировать тест приёмки (${result.reason}) — продолжаю без него.`);
+      }
+    }
+
+    // Can take minutes on a real test suite — say so up front, same reasoning as the
+    // analyzing-turn message: a long silent gap here reads as "stuck", not "working".
+    const gateNames = gates.map((g) => g.name).join(", ");
+    config.onIteration?.({ iteration: 0, phase: "baseline", costUsd: totalCostUsd, summary: `Считаю baseline по гейтам: ${gateNames}` });
+    baselines = await establishBaselines(worktreeDir, gates);
+
+    // Read-only context, injected directly rather than left for the agent to stumble
+    // onto — the project's own CLAUDE.md only auto-loads AGENTS.md, not memory files.
+    // "dev" — this is the implement role's own memory, separate from pm's/reviewer's.
+    const memories = await readMemoryFiles(config.repoPath, "dev");
+    const memoryContext = buildMemoryContextBlock(memories, "dev");
+    prompt = buildInitialPrompt(task, memoryContext, config.briefsEnabled !== false);
+    startIteration = 0;
+  }
+
+  const iterations: CloseLoopIteration[] = [];
+
+  for (let i = startIteration; i < config.maxIterations; i++) {
     const remainingBudget = config.maxBudgetUsd - totalCostUsd;
     if (remainingBudget <= 0) {
       return { task, success: false, iterations, totalCostUsd, stopReason: "max_budget", worktreeDir, acceptanceTestPath };
@@ -94,6 +128,29 @@ export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promis
     totalCostUsd += turn.totalCostUsd;
     resumeSessionId = turn.sessionId;
     config.onIteration?.({ iteration: i + 1, phase: "iterating", costUsd: totalCostUsd, summary: turn.resultText.slice(0, 200) });
+
+    // Checked before isError/gates — a brief means the agent deliberately made no
+    // (further) changes this turn rather than guess, so there's nothing to verify yet.
+    // Only supported here, in the main implement turn — not inside the review-fix
+    // loop below, where "which review round we were mid-way through" would also need
+    // to survive the pause; narrower but correctly resumable beats broader but subtly
+    // wrong. resumeSessionId is already this turn's session (set just above), so
+    // resuming continues the exact conversation the agent paused mid-way through.
+    const brief = config.briefsEnabled !== false ? parseBrief(turn.resultText) : null;
+    if (brief) {
+      iterations.push({ turn, verify: { passed: false, output: turn.resultText, gates: [] } });
+      return {
+        task,
+        success: false,
+        iterations,
+        totalCostUsd,
+        stopReason: "brief_pending",
+        worktreeDir,
+        acceptanceTestPath,
+        brief,
+        resumeState: { sessionId: resumeSessionId, iteration: i, totalCostUsd, gates, baselines, extraDeniedPaths, acceptanceTestPath, previousFingerprint },
+      };
+    }
 
     if (turn.isError) {
       iterations.push({ turn, verify: { passed: false, output: turn.resultText, gates: [] } });

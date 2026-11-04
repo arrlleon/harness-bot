@@ -27,6 +27,18 @@ test("buildInitialPrompt includes memory context when given, and omits it when n
   assert.doesNotMatch(withoutMemory, /Накопленные заметки/);
 });
 
+test("buildInitialPrompt tells the agent how to raise a brief instead of guessing", () => {
+  const task: TaskSpec = { id: "XEN-42", title: "Fix the thing", description: "It is broken.", acceptanceCriteria: [] };
+  const prompt = buildInitialPrompt(task);
+  assert.match(prompt, /БРИФ/);
+});
+
+test("buildInitialPrompt omits the brief instructions when briefsEnabled is false", () => {
+  const task: TaskSpec = { id: "XEN-42", title: "Fix the thing", description: "It is broken.", acceptanceCriteria: [] };
+  const prompt = buildInitialPrompt(task, "", false);
+  assert.doesNotMatch(prompt, /БРИФ/);
+});
+
 test("buildFeedbackPrompt reports each failing gate in its own labeled section", () => {
   const failed: GateResult[] = [
     { name: "typecheck", command: "tsc --noEmit", passed: false, output: "src/x.ts: error TS2322" },

@@ -5,6 +5,40 @@ export interface TaskSpec {
   acceptanceCriteria: string[];
 }
 
+// "Brief": a structured question an agent raises instead of guessing at genuine
+// ambiguity — concrete options, not free text, so the human answers with one click
+// (Telegram buttons) rather than typing a reply the harness would have to interpret.
+// Modeled directly on ETS Tender's own production "брифы" (10-15/day, one-click
+// answers) rather than invented from scratch.
+export interface BriefOption {
+  label: string;
+}
+
+export interface Brief {
+  question: string;
+  options: BriefOption[];
+  // Index into options — absent if the agent genuinely had no preference.
+  recommendedIndex?: number;
+  rationale?: string;
+}
+
+// Captures exactly what's needed to resume runCloseLoop's iteration loop from the
+// middle, after a pause for a brief answer — not a full re-run (which would redo
+// baseline establishment and acceptance-test writing against a worktree that already
+// has partial work in it, and would be flatly wrong once any iteration has happened).
+// Deliberately has no prompt field: at pause time the answer doesn't exist yet — only
+// resolveBrief (queue.ts), once the human has actually picked an option, knows it.
+export interface CloseLoopResumeState {
+  sessionId: string;
+  iteration: number;
+  totalCostUsd: number;
+  gates: GateSpec[];
+  baselines: GateBaseline[];
+  extraDeniedPaths?: string[];
+  acceptanceTestPath?: string;
+  previousFingerprint?: string;
+}
+
 // Every turn is one of these — used both for per-role project memory
 // (.claude/memory/jira-harness/<role>.md) and per-task scratch
 // (.harness-state/tasks/<ISSUE-KEY>/<role>/). Deliberately a closed set, not a bare
@@ -56,6 +90,14 @@ export interface EngineConfig {
   // before the loop's own baseline ever runs, while reusing the entire rest of the
   // production iteration/budget/stuck-detector/commit pipeline unchanged.
   existingWorktreeDir?: string;
+  // Present when this call is resuming after a brief was answered — skips acceptance-
+  // test writing, baseline establishment, and memory reading (all already done before
+  // the pause) and picks the iteration loop back up with `prompt` (the human's answer,
+  // via buildBriefAnswerPrompt) as the next turn. Absent on every normal (first) call.
+  resumeFrom?: CloseLoopResumeState & { prompt: string };
+  // Default true (undefined counts as enabled) — same opt-out shape as the other
+  // optional behaviors, even though this one costs nothing extra on its own.
+  briefsEnabled?: boolean;
   // Present only when the task has frozen acceptance criteria to turn into an
   // executable gate. Absent (e.g. non-reviewed dispatch paths) means no acceptance
   // test is written and the loop behaves exactly as it did before this existed.
@@ -137,6 +179,12 @@ export type QueueRunOutcome =
       durationMs: number;
       repo: string;
     }
+  // The agent genuinely isn't sure and raised a brief instead of guessing — distinct
+  // from needs_human (which means something went wrong); this just means a decision
+  // is needed before work can continue. durationMs/repo omitted on purpose: unlike
+  // needs_human/closed, this isn't a final outcome — the task is still open and will
+  // resume once resolveBrief() runs.
+  | { kind: "brief_pending"; issueKey: string }
   | { kind: "closed"; issueKey: string; costUsd: number; mrUrl: string; durationMs: number; repo: string };
 
 export interface CloseLoopResult {
@@ -152,7 +200,8 @@ export interface CloseLoopResult {
     | "agent_error"
     | "stuck"
     | "review_blocked"
-    | "gate_integrity_violation";
+    | "gate_integrity_violation"
+    | "brief_pending";
   worktreeDir: string;
   // Set only when stopReason is "stuck" — the gate(s) whose failure fingerprint
   // repeated identically across two consecutive iterations, for diagnostics in the
@@ -189,6 +238,11 @@ export interface CloseLoopResult {
   // cache_creation token count that tripped maxContextTokens, for the needs_human
   // reason text.
   contextTokens?: number;
+  // Both set only when stopReason is "brief_pending" — the question to put in front of
+  // the human, and everything needed to resume this exact session once they answer
+  // (see resolveBrief in queue.ts and CloseLoopResumeState above).
+  brief?: Brief;
+  resumeState?: CloseLoopResumeState;
 }
 
 export interface ReviewFinding {

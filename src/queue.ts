@@ -2,6 +2,7 @@ import { config } from "./config.js";
 import { JiraClient, type JiraIssue } from "./jira/client.js";
 import { detectRepo, toTaskSpec, type RepoDetection } from "./jira/mapToTask.js";
 import { runCloseLoop } from "./engine/loop.js";
+import { formatBriefAsText, buildBriefAnswerPrompt } from "./engine/brief.js";
 import { runClaudeTurn } from "./engine/claudeEngine.js";
 import { parseProposalResponse } from "./engine/proposal.js";
 import { readMemoryFiles, buildMemoryContextBlock } from "./engine/memory.js";
@@ -16,11 +17,13 @@ import {
   clearPendingApproval,
   setPendingHumanReview,
   clearPendingHumanReview,
+  setPendingBrief,
+  clearPendingBrief,
 } from "./bot/liveState.js";
 import { commitAll, deleteBranch, getWorktreeDiff, removeWorktree, worktreeDirFor } from "./engine/git.js";
 import { writeCheckpoint, clearCheckpoint } from "./engine/checkpoint.js";
 import { loadState, costSince, countSince, startOfTodayIso, estimateCost, type CostEstimate } from "./bot/state.js";
-import type { CloseLoopResult, GateSpec, QueueRunOutcome, TaskSpec } from "./types.js";
+import type { CloseLoopResult, EngineConfig, GateSpec, QueueRunOutcome, TaskSpec } from "./types.js";
 
 // What runJob itself can determine — it has no notion of elapsed wall-clock time or
 // which repo was targeted (that's dispatchIssue's job, wrapping the call). Same shape
@@ -31,7 +34,8 @@ type JobOutcome =
   | { kind: "busy"; issueKey: string }
   | { kind: "skipped"; issueKey: string; reason: string }
   | { kind: "needs_human"; issueKey: string; costUsd: number; reason: string; worktreeDir: string; branchName: string }
-  | { kind: "closed"; issueKey: string; costUsd: number; mrUrl: string };
+  | { kind: "closed"; issueKey: string; costUsd: number; mrUrl: string }
+  | { kind: "brief_pending"; issueKey: string };
 
 const QUEUE_JQL = () =>
   `project = ${config.jira.projectKey} AND assignee = currentUser() AND statusCategory = "To Do" ORDER BY priority DESC`;
@@ -477,6 +481,11 @@ interface CloseLoopAndPushOutcome {
   mrUrl?: string;
   failureReason?: string;
   failureKind?: CloseAndPushFailureKind;
+  // Set when the agent raised a brief instead of guessing — distinct from failureKind:
+  // nothing went wrong, a decision is needed before this task can continue. The caller
+  // persists result.brief/result.resumeState (setPendingBrief) rather than treating
+  // this like any other failure.
+  briefPending?: boolean;
 }
 
 // The actual "do the work" step, shared by the single-repo (runJob) and cross-repo
@@ -490,6 +499,7 @@ async function closeLoopAndPush(
   repo: RepoHandle,
   task: TaskSpec,
   branchName: string,
+  resumeFrom?: EngineConfig["resumeFrom"],
 ): Promise<CloseLoopAndPushOutcome> {
   // Checkpoint is bookkeeping, not a resume mechanism: if this process dies mid-task
   // (OOM-kill etc.), the worktree on disk already has whatever's there — the
@@ -537,12 +547,18 @@ async function closeLoopAndPush(
       ? { model: config.models.testing, baseBranch: config.gitlab.targetBranch }
       : undefined,
     gateIntegrityCheck: config.gateIntegrityCheckEnabled ? { baseBranch: config.gitlab.targetBranch } : undefined,
+    briefsEnabled: config.briefsEnabled,
+    resumeFrom,
     onIteration: ({ iteration, phase, costUsd, summary }) => {
       updateJob({ iteration, phase, costUsd, lastTurnSummary: summary });
       checkpointAt(worktreeDirFor(branchName), iteration, costUsd, phase);
     },
     onLog: appendLog,
   });
+
+  if (result.stopReason === "brief_pending") {
+    return { closeLoopResult: result, briefPending: true };
+  }
 
   if (!result.success) {
     // "stuck", "review_blocked" and "gate_integrity_violation" all have more to say
@@ -606,7 +622,41 @@ async function runJob(
   await jira.transitionTo(issue.key, config.jira.inProgressStatus);
 
   const outcome = await closeLoopAndPush(issue, repo, task, branchName);
+  return handleCloseLoopOutcome(jira, issue, repo, task, branchName, outcome);
+}
+
+// Shared by runJob's first attempt and resolveBrief's resumed attempt — a resumed
+// session can succeed, fail, or raise ANOTHER brief, and all three need exactly the
+// same handling a first attempt would get.
+async function handleCloseLoopOutcome(
+  jira: JiraClient,
+  issue: { key: string; summary: string },
+  repo: RepoHandle,
+  task: TaskSpec,
+  branchName: string,
+  outcome: CloseLoopAndPushOutcome,
+): Promise<JobOutcome> {
   const result = outcome.closeLoopResult;
+
+  if (outcome.briefPending) {
+    await jira.addComment(
+      issue.key,
+      `jira-harness: вопрос перед продолжением работы — см. Telegram.\n«${result.brief!.question}»`,
+    );
+    setPendingBrief({
+      issueKey: issue.key,
+      title: issue.summary,
+      task,
+      brief: result.brief!,
+      worktreeDir: result.worktreeDir,
+      branchName,
+      gitlabProjectPath: repo.gitlabProjectPath,
+      resumeState: result.resumeState!,
+    });
+    // pendingBrief is the durable record now — same reasoning as pendingHumanReview.
+    clearCheckpoint(issue.key);
+    return { kind: "brief_pending", issueKey: issue.key };
+  }
 
   if (outcome.failureKind) {
     const message =
@@ -700,6 +750,35 @@ async function runCrossRepoJob(
   const backendOutcome = await closeLoopAndPush(issue, backend.repo, backend.task, backend.branchName);
   const backendResult = backendOutcome.closeLoopResult;
 
+  if (backendOutcome.briefPending) {
+    // One-click brief resolution (setPendingBrief/resolveBrief) only knows how to
+    // resume a single-repo task — continuing a cross-repo task into its frontend half
+    // after the backend brief is answered needs its own resume path, not built yet.
+    // Falls back to the existing needs_human flow instead: safe (nothing is lost or
+    // silently misrouted), just not one-click — the question/options are spelled out
+    // as text, and a human decides via accept/reject like any other needs_human case.
+    const reason = `backend: ${formatBriefAsText(backendResult.brief!)}`;
+    await jira.addComment(issue.key, `jira-harness (cross-repo): вопрос от бэкенда — ${reason}`);
+    setPendingHumanReview({
+      issueKey: issue.key,
+      title: issue.summary,
+      reason,
+      costUsd: backendResult.totalCostUsd,
+      worktreeDir: backendResult.worktreeDir,
+      branchName: backend.branchName,
+      gitlabProjectPath: backend.repo.gitlabProjectPath,
+    });
+    clearCheckpoint(issue.key);
+    return {
+      kind: "needs_human",
+      issueKey: issue.key,
+      costUsd: backendResult.totalCostUsd,
+      reason,
+      worktreeDir: backendResult.worktreeDir,
+      branchName: backend.branchName,
+    };
+  }
+
   if (backendOutcome.failureKind) {
     const reason = `backend: ${backendOutcome.failureReason}`;
     await jira.addComment(
@@ -761,6 +840,32 @@ async function runCrossRepoJob(
   const frontendOutcome = await closeLoopAndPush(issue, frontend.repo, frontendTask, frontend.branchName);
   const frontendResult = frontendOutcome.closeLoopResult;
   const totalCostUsd = backendResult.totalCostUsd + frontendResult.totalCostUsd;
+
+  if (frontendOutcome.briefPending) {
+    // Same fallback as the backend branch above — one-click brief resolution isn't
+    // wired up for cross-repo tasks yet, so this routes through needs_human instead,
+    // with the question spelled out as text. Backend's MR already stands on its own.
+    const reason = `frontend: ${formatBriefAsText(frontendResult.brief!)} (backend already opened: ${backendOutcome.mrUrl})`;
+    await jira.addComment(issue.key, `jira-harness (cross-repo): backend done — ${backendOutcome.mrUrl}\nвопрос от фронтенда — ${reason}`);
+    setPendingHumanReview({
+      issueKey: issue.key,
+      title: issue.summary,
+      reason,
+      costUsd: totalCostUsd,
+      worktreeDir: frontendResult.worktreeDir,
+      branchName: frontend.branchName,
+      gitlabProjectPath: frontend.repo.gitlabProjectPath,
+    });
+    clearCheckpoint(issue.key);
+    return {
+      kind: "needs_human",
+      issueKey: issue.key,
+      costUsd: totalCostUsd,
+      reason,
+      worktreeDir: frontendResult.worktreeDir,
+      branchName: frontend.branchName,
+    };
+  }
 
   if (frontendOutcome.failureKind) {
     const reason = `frontend: ${frontendOutcome.failureReason} (backend already opened: ${backendOutcome.mrUrl})`;
@@ -859,14 +964,51 @@ export async function resolveHumanReview(accept: boolean): Promise<{ mrUrl: stri
   return { mrUrl: mr.webUrl };
 }
 
+// The human picked an option for a brief the agent raised instead of guessing (see
+// parseBrief in engine/brief.ts). Resumes the exact same claude session the agent
+// paused — CloseLoopResumeState skips redoing baseline/acceptance-test setup, which
+// would be wrong against a worktree that already has partial work in it — with the
+// chosen option woven into the next prompt. Whatever happens next (success, a normal
+// failure, or another brief) gets exactly the same handling a first attempt would.
+export async function resolveBrief(chosenIndex: number): Promise<QueueRunOutcome | null> {
+  const pending = getLiveState().pendingBrief;
+  if (!pending) return null;
+  clearPendingBrief();
+
+  const jira = new JiraClient(config.jira.baseUrl, config.jira.token);
+  const repo = repoConfigFor(pending.gitlabProjectPath);
+  const issue = { key: pending.issueKey, summary: pending.title };
+  const answerPrompt = buildBriefAnswerPrompt(pending.brief, chosenIndex);
+
+  startJob(pending.issueKey, pending.title, pending.task.description, pending.gitlabProjectPath, config.maxIterations);
+  const startedAt = Date.now();
+  try {
+    const outcome = await closeLoopAndPush(issue, repo, pending.task, pending.branchName, {
+      ...pending.resumeState,
+      prompt: answerPrompt,
+    });
+    const jobOutcome = await handleCloseLoopOutcome(jira, issue, repo, pending.task, pending.branchName, outcome);
+    if (jobOutcome.kind === "closed" || jobOutcome.kind === "needs_human") {
+      return { ...jobOutcome, durationMs: Date.now() - startedAt, repo: pending.gitlabProjectPath };
+    }
+    return jobOutcome;
+  } finally {
+    finishJob();
+  }
+}
+
 export async function getPendingHumanReviewDiff(): Promise<string | null> {
   const pending = getLiveState().pendingHumanReview;
   if (!pending) return null;
   return getWorktreeDiff(pending.worktreeDir, config.gitlab.targetBranch);
 }
 
-function repoPathFor(gitlabProjectPath: string): string {
+function repoConfigFor(gitlabProjectPath: string): RepoHandle {
   const match = Object.values(config.repos).find((r) => r.gitlabProjectPath === gitlabProjectPath);
-  if (!match?.path) throw new Error(`No configured repo path for GitLab project "${gitlabProjectPath}"`);
-  return match.path;
+  if (!match?.path) throw new Error(`No configured repo for GitLab project "${gitlabProjectPath}"`);
+  return match;
+}
+
+function repoPathFor(gitlabProjectPath: string): string {
+  return repoConfigFor(gitlabProjectPath).path;
 }

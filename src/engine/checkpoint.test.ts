@@ -126,6 +126,29 @@ test("recoverOrphanedCheckpoints skips an issue that already has a pendingApprov
   liveState.clearPendingApproval();
 });
 
+test("recoverOrphanedCheckpoints skips an issue that already has a pendingBrief", () => {
+  liveState.clearPendingHumanReview();
+  liveState.setPendingBrief({
+    issueKey: "XEN-104",
+    title: "Needs a decision",
+    task: { id: "XEN-104", title: "Needs a decision", description: "d", acceptanceCriteria: [] },
+    brief: { question: "Which way?", options: [{ label: "A" }, { label: "B" }] },
+    worktreeDir: "/tmp/does-not-need-to-exist-for-this-test",
+    branchName: "harness/xen-104",
+    gitlabProjectPath: "saqr/back-ai",
+    resumeState: { sessionId: "sess-1", iteration: 1, totalCostUsd: 0.1, gates: [], baselines: [] },
+  });
+  checkpoint.writeCheckpoint(sampleCheckpoint("XEN-104"));
+
+  const recovered = checkpoint.recoverOrphanedCheckpoints();
+
+  assert.equal(recovered.length, 0);
+  assert.equal(liveState.getLiveState().pendingHumanReview, null);
+
+  checkpoint.clearCheckpoint("XEN-104");
+  liveState.clearPendingBrief();
+});
+
 test("recoverOrphanedCheckpoints returns nothing when no checkpoints are on disk", () => {
   liveState.clearPendingApproval();
   liveState.clearPendingHumanReview();

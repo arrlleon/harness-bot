@@ -124,6 +124,10 @@ export const config = {
   // need a hard stop the same way MAX_ITERATIONS is one for the gate-fixing loop —
   // otherwise a pair that never agrees just burns the whole task budget arguing.
   maxReviewRounds: Number(process.env.MAX_REVIEW_ROUNDS ?? 3),
+  // Same shape, same default. Costs nothing extra (a brief is a different shape of the
+  // SAME implement turn's response, not a separate turn) — the toggle exists for
+  // debugging/rollback, same reasoning as gateIntegrityCheckEnabled.
+  briefsEnabled: (process.env.BRIEFS_ENABLED ?? "true") !== "false",
   // Same shape, same default. Purely informational (never blocks a push) — one more
   // read-only turn per successful task, same cost tier as review/memory.
   testingNotesEnabled: (process.env.TESTING_NOTES_ENABLED ?? "true") !== "false",
