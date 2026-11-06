@@ -304,6 +304,11 @@ test("rebaseOntoFreshBase cleanly replays worktree work onto new remote commits,
 
     const outcome = await rebaseOntoFreshBase(dir, "dev");
     assert.equal(outcome.conflict, false);
+    // HEAD moved — the worktree's own commit got a new SHA when replayed onto
+    // origin's new tip. A caller holding gate baselines from before the pause needs
+    // this signal to know they might no longer reflect the repo's real pre-existing
+    // noise and should be re-measured.
+    assert.equal(outcome.rebased, true);
 
     const readme = await readFile(join(dir, "README.md"), "utf8");
     assert.equal(readme, "initial\nnewer on origin\n");
@@ -325,6 +330,7 @@ test("rebaseOntoFreshBase is a safe no-op when the remote has nothing new", asyn
     const dir = await createWorktree(local, branch);
     const outcome = await rebaseOntoFreshBase(dir, "dev");
     assert.equal(outcome.conflict, false);
+    assert.equal(outcome.rebased, false); // nothing to replay — HEAD never moved
   } finally {
     await cleanup(local, branch);
     await rm(origin, { recursive: true, force: true });
@@ -345,6 +351,7 @@ test("rebaseOntoFreshBase detects a real conflict and leaves the worktree back i
 
     const outcome = await rebaseOntoFreshBase(dir, "dev");
     assert.equal(outcome.conflict, true);
+    assert.equal(outcome.rebased, false);
     assert.match(outcome.output, /conflict/i);
 
     // Aborted back to exactly where it was — the worktree's own content, no

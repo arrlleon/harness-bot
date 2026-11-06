@@ -63,6 +63,13 @@ export interface RebaseOutcome {
   conflict: boolean;
   // Diagnostic text for a human when conflict is true — raw git output, not parsed.
   output: string;
+  // True only if HEAD actually moved (dev had real new commits to replay onto). A
+  // caller holding gate baselines established before the pause should treat this as
+  // "the underlying code just changed under those counts, re-measure them" — a
+  // baseline-relative gate compares against the repo's OWN pre-existing failure count,
+  // and dev moving on can shift that count in either direction without this task's own
+  // work being at fault.
+  rebased: boolean;
 }
 
 // Fetches origin/<targetBranch> and rebases the worktree's current branch onto it —
@@ -82,15 +89,17 @@ export interface RebaseOutcome {
 // (nothing left "in progress") and a stash is left behind — the caller's escalation
 // message says to check `git stash list` for that case.
 export async function rebaseOntoFreshBase(worktreeDir: string, targetBranch: string): Promise<RebaseOutcome> {
+  const { stdout: before } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: worktreeDir });
   await execFileAsync("git", ["fetch", "origin", targetBranch], { cwd: worktreeDir });
   try {
     const { stdout, stderr } = await execFileAsync("git", ["rebase", "--autostash", `origin/${targetBranch}`], { cwd: worktreeDir });
-    return { conflict: false, output: stdout + stderr };
+    const { stdout: after } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: worktreeDir });
+    return { conflict: false, output: stdout + stderr, rebased: after.trim() !== before.trim() };
   } catch (err) {
     const e = err as { stdout?: string; stderr?: string; message: string };
     const output = [e.stdout, e.stderr].filter(Boolean).join("\n") || e.message;
     await execFileAsync("git", ["rebase", "--abort"], { cwd: worktreeDir }).catch(() => {});
-    return { conflict: true, output };
+    return { conflict: true, output, rebased: false };
   }
 }
 

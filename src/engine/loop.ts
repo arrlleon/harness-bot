@@ -301,6 +301,18 @@ export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promis
         rebaseConflictOutput: rebase.output,
       };
     }
+    // Known, deliberately accepted gap: gate baselines (config.resumeFrom.baselines)
+    // were measured before the pause and aren't re-measured here even when rebase.rebased
+    // is true. Re-measuring correctly would mean checking gates against the fresh base
+    // ALONE, excluding this task's own (committed or autostash-restored uncommitted)
+    // work — the rebased worktree itself mixes both, so measuring here would wrongly
+    // bake the agent's own in-progress edits into "pre-existing noise". Doing it right
+    // needs a disposable worktree at origin/<target> just for this measurement, which
+    // is real added cost for a low-severity, low-probability drift (dev's own unrelated
+    // commits nudging a failure count) — not worth it until it actually bites someone.
+    if (rebase.rebased) {
+      config.onLog?.("🔄 dev продвинулся во время паузы и перебазирован — baseline по гейтам из-до паузы мог немного устареть (известное ограничение)");
+    }
   }
 
   // Resuming a brief raised during the review<->fix loop's own fix turn — the main
