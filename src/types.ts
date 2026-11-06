@@ -74,6 +74,7 @@ export type CrossRepoBriefContext =
       backendMrUrl: string;
       backendCostUsd: number;
       backendTestingNotes?: string;
+      backendCloseReport?: string;
       backendReviewRounds?: number;
     };
 
@@ -162,6 +163,11 @@ export interface EngineConfig {
   // acceptanceTest/memory/review. Never blocks anything (unlike review): it's purely
   // informational output for a human tester, surfaced in the Jira success comment.
   testingNotes?: { model: string; baseBranch: string };
+  // Absent disables the plain-language close report — same opt-out shape and the same
+  // input (diff + task) as testingNotes, different audience: whoever asked for the
+  // ticket, not a tester. Never blocks anything, surfaced in the closing Telegram
+  // message instead of the Jira comment testingNotes rides along in.
+  closeReport?: { model: string; baseBranch: string };
   // Absent disables the mechanical gate-integrity check — same opt-out shape as the
   // other optional stages, but this one costs no extra LLM turn (pure diff parsing),
   // so there's little reason to ever turn it off outside of debugging it.
@@ -176,6 +182,7 @@ export interface EngineConfig {
       | "checking_gate_integrity"
       | "reviewing"
       | "writing_testing_notes"
+      | "writing_close_report"
       | "updating_memory";
     costUsd: number;
     summary: string;
@@ -235,7 +242,19 @@ export type QueueRunOutcome =
   // needs_human/closed, this isn't a final outcome — the task is still open and will
   // resume once resolveBrief() runs.
   | { kind: "brief_pending"; issueKey: string }
-  | { kind: "closed"; issueKey: string; costUsd: number; mrUrl: string; durationMs: number; repo: string; reviewRounds?: number };
+  | {
+      kind: "closed";
+      issueKey: string;
+      costUsd: number;
+      mrUrl: string;
+      durationMs: number;
+      repo: string;
+      reviewRounds?: number;
+      // Plain-language summary from the close-report turn, shown in the closing
+      // Telegram message in place of a bare "closed, here's the MR". Absent if
+      // CLOSE_REPORT_ENABLED is off, the turn errored, or it came back empty.
+      report?: string;
+    };
 
 export interface CloseLoopResult {
   task: TaskSpec;
@@ -283,6 +302,11 @@ export interface CloseLoopResult {
   // Предусловия/Шаги/Ожидаемый результат write-up for a human tester, surfaced in the
   // Jira success comment. Absent if the turn was disabled, errored, or came back empty.
   testingNotes?: string;
+  // Set whenever the close-report turn ran and produced non-empty output — a few
+  // plain-language sentences for whoever asked for the ticket, surfaced in the closing
+  // Telegram message instead of a bare "closed, here's the MR". Absent if the turn was
+  // disabled, errored, or came back empty.
+  closeReport?: string;
   // Set only when stopReason is "gate_integrity_violation" — a mechanical check (not
   // an LLM judgment call) found the agent weakening the thing that judges it: a
   // deleted test file, a newly added skip/only/todo marker, or an edit to CI/gate

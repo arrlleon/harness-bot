@@ -123,6 +123,7 @@ var PHASE_RU = {
   checking_gate_integrity: "проверяю, не ослаблены ли гейты",
   reviewing: "независимое ревью изменений",
   writing_testing_notes: "пишу инструкцию для тестировщика",
+  writing_close_report: "пишу сводку для тебя",
   updating_memory: "обновляю project memory",
   pushing: "отправка ветки в репозиторий",
   opening_mr: "открытие MR",

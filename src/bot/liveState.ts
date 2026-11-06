@@ -17,6 +17,7 @@ export type JobPhase =
   | "checking_gate_integrity"
   | "reviewing"
   | "writing_testing_notes"
+  | "writing_close_report"
   | "updating_memory"
   | "pushing"
   | "opening_mr"

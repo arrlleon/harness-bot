@@ -34,7 +34,7 @@ type JobOutcome =
   | { kind: "busy"; issueKey: string }
   | { kind: "skipped"; issueKey: string; reason: string }
   | { kind: "needs_human"; issueKey: string; costUsd: number; reason: string; worktreeDir: string; branchName: string; reviewRounds?: number }
-  | { kind: "closed"; issueKey: string; costUsd: number; mrUrl: string; reviewRounds?: number }
+  | { kind: "closed"; issueKey: string; costUsd: number; mrUrl: string; reviewRounds?: number; report?: string }
   | { kind: "brief_pending"; issueKey: string };
 
 const QUEUE_JQL = () =>
@@ -546,6 +546,9 @@ async function closeLoopAndPush(
     testingNotes: config.testingNotesEnabled
       ? { model: config.models.testing, baseBranch: config.gitlab.targetBranch }
       : undefined,
+    closeReport: config.closeReportEnabled
+      ? { model: config.models.report, baseBranch: config.gitlab.targetBranch }
+      : undefined,
     gateIntegrityCheck: config.gateIntegrityCheckEnabled ? { baseBranch: config.gitlab.targetBranch } : undefined,
     freshBase: config.freshBaseEnabled ? { baseBranch: config.gitlab.targetBranch } : undefined,
     briefsEnabled: config.briefsEnabled,
@@ -711,7 +714,14 @@ async function handleCloseLoopOutcome(
   await jira.transitionTo(issue.key, config.jira.reviewStatus);
   await cleanupWorktree(repo.path, result.worktreeDir, branchName);
   clearCheckpoint(issue.key);
-  return { kind: "closed", issueKey: issue.key, costUsd: result.totalCostUsd, mrUrl: outcome.mrUrl!, reviewRounds: result.reviewRounds };
+  return {
+    kind: "closed",
+    issueKey: issue.key,
+    costUsd: result.totalCostUsd,
+    mrUrl: outcome.mrUrl!,
+    reviewRounds: result.reviewRounds,
+    report: result.closeReport,
+  };
 }
 
 // Shared by the single-repo and cross-repo success comments — the whole point of the
@@ -871,7 +881,13 @@ async function afterBackendAttempt(
     jira,
     issue,
     { task: frontendTask, repo: frontend.repo, branchName: frontend.branchName },
-    { totalCostUsd: backendResult.totalCostUsd, testingNotes: backendResult.testingNotes, reviewRounds: backendResult.reviewRounds, mrUrl: backendOutcome.mrUrl! },
+    {
+      totalCostUsd: backendResult.totalCostUsd,
+      testingNotes: backendResult.testingNotes,
+      closeReport: backendResult.closeReport,
+      reviewRounds: backendResult.reviewRounds,
+      mrUrl: backendOutcome.mrUrl!,
+    },
     frontendOutcome,
   );
 }
@@ -886,7 +902,7 @@ async function afterFrontendAttempt(
   jira: JiraClient,
   issue: { key: string; summary: string },
   frontend: { task: TaskSpec; repo: RepoHandle; branchName: string },
-  backendInfo: { totalCostUsd: number; testingNotes?: string; reviewRounds?: number; mrUrl: string },
+  backendInfo: { totalCostUsd: number; testingNotes?: string; closeReport?: string; reviewRounds?: number; mrUrl: string },
   frontendOutcome: CloseLoopAndPushOutcome,
 ): Promise<JobOutcome> {
   const frontendResult = frontendOutcome.closeLoopResult;
@@ -911,6 +927,7 @@ async function afterFrontendAttempt(
         backendMrUrl: backendInfo.mrUrl,
         backendCostUsd: backendInfo.totalCostUsd,
         backendTestingNotes: backendInfo.testingNotes,
+        backendCloseReport: backendInfo.closeReport,
         backendReviewRounds: backendInfo.reviewRounds,
       },
     });
@@ -957,6 +974,10 @@ async function afterFrontendAttempt(
   ]
     .filter(Boolean)
     .join("\n\n");
+  // Unlike testingNotes (Jira, for a tester), the close report is for whoever asked
+  // for the ticket and never sees Jira comments — it only ever reaches the closing
+  // Telegram message, combined here the same way crossRepoNotes combines above.
+  const crossRepoReport = [backendInfo.closeReport, frontendResult.closeReport].filter(Boolean).join(" ");
 
   updateJob({ phase: "commenting" });
   await jira.addComment(
@@ -977,6 +998,7 @@ async function afterFrontendAttempt(
     costUsd: totalCostUsd,
     mrUrl: `backend: ${backendInfo.mrUrl}, frontend: ${frontendOutcome.mrUrl}`,
     reviewRounds: sumReviewRounds(backendInfo.reviewRounds, frontendResult.reviewRounds),
+    report: crossRepoReport || undefined,
   };
 }
 
@@ -1059,6 +1081,7 @@ export async function resolveBrief(chosenIndex: number): Promise<QueueRunOutcome
         {
           totalCostUsd: pending.crossRepo.backendCostUsd,
           testingNotes: pending.crossRepo.backendTestingNotes,
+          closeReport: pending.crossRepo.backendCloseReport,
           reviewRounds: pending.crossRepo.backendReviewRounds,
           mrUrl: pending.crossRepo.backendMrUrl,
         },

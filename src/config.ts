@@ -110,6 +110,10 @@ export const config = {
     // bounded-judgment shape as propose/acceptance/memory, not an open-ended loop —
     // Sonnet, same tier as those.
     testing: process.env.TESTING_MODEL ?? "claude-sonnet-5",
+    // Same bounded-judgment shape again — translating a diff into a few plain-language
+    // sentences for a non-technical audience needs real judgment about what matters,
+    // not raw capability — Sonnet, same tier as testing/memory/acceptance/propose.
+    report: process.env.REPORT_MODEL ?? "claude-sonnet-5",
   },
   // On by default — this is the whole point of freezing acceptance criteria at
   // propose time. Kept as a single kill switch (not per-repo) so it can be turned
@@ -135,6 +139,10 @@ export const config = {
   // Same shape, same default. Purely informational (never blocks a push) — one more
   // read-only turn per successful task, same cost tier as review/memory.
   testingNotesEnabled: (process.env.TESTING_NOTES_ENABLED ?? "true") !== "false",
+  // Same shape, same default. Replaces the bare "closed, here's the MR" Telegram
+  // message with a few plain-language sentences for whoever asked for the ticket —
+  // one more read-only turn per successful task, same cost tier as testing notes.
+  closeReportEnabled: (process.env.CLOSE_REPORT_ENABLED ?? "true") !== "false",
   // Same opt-out shape, but this one is pure diff parsing — no extra LLM turn, no extra
   // cost or latency — so there's little reason to turn it off outside of debugging it.
   gateIntegrityCheckEnabled: (process.env.GATE_INTEGRITY_CHECK_ENABLED ?? "true") !== "false",

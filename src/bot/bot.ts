@@ -79,8 +79,10 @@ function describeOutcome(outcome: QueueRunOutcome | { kind: "error"; message: st
       return `⏭ Пропустил ${outcome.issueKey} (${outcome.reason})`;
     case "needs_human":
       return `⚠️ Застрял на ${outcome.issueKey} (${outcome.reason}), потратил $${outcome.costUsd.toFixed(4)} — нужно твоё решение`;
-    case "closed":
-      return `✅ Готово: ${outcome.issueKey} закрыт, MR — ${outcome.mrUrl} (потратил $${outcome.costUsd.toFixed(4)})`;
+    case "closed": {
+      const reportLine = outcome.report ? `\n\n${outcome.report}` : "";
+      return `✅ Готово: ${outcome.issueKey} закрыт, MR — ${outcome.mrUrl} (потратил $${outcome.costUsd.toFixed(4)})${reportLine}`;
+    }
     case "error":
       return `❌ Не получилось: ${outcome.message}`;
   }

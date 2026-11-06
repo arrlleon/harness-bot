@@ -17,6 +17,7 @@ import { readMemoryFiles, buildMemoryContextBlock, updateProjectMemory } from ".
 import { fingerprintFailure } from "./stuckDetector.js";
 import { reviewChanges, buildReviewFixPrompt, formatReviewRound } from "./review.js";
 import { generateTestingNotes } from "./testingNotes.js";
+import { generateCloseReport } from "./closeReport.js";
 import { checkGateIntegrity } from "./gateIntegrity.js";
 import { writeTaskContext } from "./agentContext.js";
 import { parseBrief } from "./brief.js";
@@ -276,6 +277,18 @@ async function runPostImplementSuccess(
     if (notesResult.reason) config.onLog?.(`⚠️ Не удалось сгенерировать инструкцию для тестировщика (${notesResult.reason})`);
   }
 
+  // Same opt-in shape as testingNotes above — purely informational, different audience
+  // (whoever asked for the ticket, not a tester), different destination (the closing
+  // Telegram message, not the Jira comment).
+  let closeReport: string | undefined;
+  if (config.closeReport) {
+    config.onIteration?.({ iteration: iterations.length, phase: "writing_close_report", costUsd: totalCostUsd, summary: "Пишу сводку для тебя" });
+    const reportResult = await generateCloseReport(worktreeDir, task, config.closeReport);
+    totalCostUsd += reportResult.costUsd;
+    closeReport = reportResult.report;
+    if (reportResult.reason) config.onLog?.(`⚠️ Не удалось написать сводку (${reportResult.reason})`);
+  }
+
   let memoryUpdated = false;
   if (config.memory) {
     config.onIteration?.({ iteration: iterations.length, phase: "updating_memory", costUsd: totalCostUsd, summary: "Обновляю project memory" });
@@ -297,6 +310,7 @@ async function runPostImplementSuccess(
     reviewFindings,
     reviewRounds: config.review ? reviewRounds : undefined,
     testingNotes,
+    closeReport,
   };
 }
 
