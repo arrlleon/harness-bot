@@ -29,6 +29,21 @@ export function totalContextTokens(usage: ClaudeTurnUsage): number {
   return usage.inputTokens + usage.cacheReadInputTokens + usage.cacheCreationInputTokens;
 }
 
+// True when a resumed review-fix brief can no longer be safely processed by the normal
+// loop below: review got disabled, or MAX_REVIEW_ROUNDS was lowered below the round
+// that raised the brief (both only possible via a config edit + bot restart while the
+// brief sat pending). Without this check, `if (config.review)` skips the loop entirely
+// when review is now disabled, and an empty-range `for` loop does the same when
+// maxRounds dropped below the resuming round — either way silently discarding the
+// human's already-given answer and reporting "verified" despite a known blocking
+// finding nobody ever actually addressed.
+export function reviewResumeNowUnsafe(
+  resumingFix: { round: number } | undefined,
+  review: { maxRounds: number } | undefined,
+): boolean {
+  return !!resumingFix && (!review || resumingFix.round > review.maxRounds);
+}
+
 // Everything that runs once the implement loop has a real, committed success: gate
 // integrity, the independent review<->fix loop, testing notes, project memory. Entered
 // two ways: normally, right after the main loop's own success (startRound/resumingFix
@@ -95,6 +110,33 @@ async function runPostImplementSuccess(
   // needs_human case sees the actual back-and-forth, not just the final verdict.
   let reviewFindings: ReviewFinding[] | undefined;
   let reviewRounds = 0;
+
+  // A resumingFix means a human already answered a question raised mid-review — if
+  // REVIEW_ENABLED/MAX_REVIEW_ROUNDS changed (via a config edit + bot restart) while
+  // that brief sat pending, naively falling into the loop below could silently discard
+  // the pending blocking findings and report success without ever applying the human's
+  // answer: with review now disabled, `if (config.review)` below just skips straight to
+  // testingNotes/memory; with maxRounds lowered below this round, the for loop's range
+  // is empty from the start and never runs either. Both would report "verified" despite
+  // a known blocking finding nobody ever actually addressed. Escalate instead, with the
+  // same reviewFindings/reviewRounds a normal review_blocked carries, so a human sees
+  // exactly what's unresolved rather than a false "all clear".
+  if (reviewResumeNowUnsafe(ctx.resumingFix, config.review)) {
+    // reviewResumeNowUnsafe only returns true when ctx.resumingFix is defined — the
+    // non-null assertions below are exactly that runtime guarantee, not an assumption.
+    return {
+      task,
+      success: false,
+      iterations,
+      totalCostUsd,
+      stopReason: "review_blocked",
+      worktreeDir,
+      acceptanceTestPath,
+      reviewFindings: ctx.resumingFix!.blocking,
+      reviewRounds: ctx.resumingFix!.round,
+    };
+  }
+
   if (config.review) {
     for (let round = ctx.resumingFix?.round ?? 1; round <= config.review.maxRounds; round++) {
       reviewRounds = round;
