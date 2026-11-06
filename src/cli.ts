@@ -97,26 +97,31 @@ program
   .description("Run the mini eval set (real historical bugs) against the current model/prompt config")
   .option("--case <id...>", "Run only these case ids (default: all cases in evals/cases/)")
   .option("--model <name>", "Override IMPLEMENT_MODEL for this run only, to compare models")
+  .option("--k <n>", "Run each case this many times (pass@1/pass^k instead of a single pass/fail)", "1")
   .action(async (opts) => {
     const { config } = await import("./config.js");
     const { runEvalSuite } = await import("./evals/runSuite.js");
     const { formatSuiteReport } = await import("./evals/report.js");
 
     const model = opts.model ?? config.models.implement;
-    console.log(`[eval] running ${opts.case ? opts.case.join(", ") : "all cases"} with model=${model}...`);
+    const k = Number(opts.k);
+    console.log(`[eval] running ${opts.case ? opts.case.join(", ") : "all cases"} with model=${model}, k=${k}...`);
 
     const { result, savedTo } = await runEvalSuite(opts.case, {
       repos: config.repos,
       model,
+      k,
       maxIterations: config.maxIterations,
       maxBudgetUsd: config.maxBudgetUsd,
       onCaseStart: (id) => console.log(`[eval] ${id}: starting...`),
-      onCaseDone: (r) => console.log(`[eval] ${r.caseId}: ${r.passed ? "PASS" : "FAIL"} (${r.stopReason}, $${r.costUsd.toFixed(4)})`),
+      onAttemptDone: (id, i, total, r) =>
+        console.log(`[eval] ${id} (${i}/${total}): ${r.passed ? "PASS" : "FAIL"} (${r.stopReason}, $${r.costUsd.toFixed(4)})`),
+      onCaseDone: (agg) => console.log(`[eval] ${agg.caseId}: ${agg.passAtK ? "PASS" : "FAIL"} (pass@1=${agg.passAtOneRate.toFixed(2)})`),
     });
 
     console.log("\n" + formatSuiteReport(result));
     console.log(`\n[eval] saved to ${savedTo}`);
-    process.exit(result.passCount === result.totalCount ? 0 : 1);
+    process.exit(result.passAtKCount === result.totalCount ? 0 : 1);
   });
 
 program

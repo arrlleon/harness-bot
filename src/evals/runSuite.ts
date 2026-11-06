@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { HARNESS_STATE_DIR } from "../bot/liveState.js";
 import { loadEvalCase, loadAllEvalCases } from "./loadCases.js";
 import { runEvalCase } from "./runCase.js";
-import type { EvalCaseResult, EvalSuiteResult } from "./types.js";
+import type { EvalCase, EvalCaseAggregate, EvalCaseResult, EvalSuiteResult } from "./types.js";
 import type { RepoConfig } from "../config.js";
 
 export interface RunEvalSuiteOptions {
@@ -11,8 +11,47 @@ export interface RunEvalSuiteOptions {
   model: string;
   maxIterations: number;
   maxBudgetUsd: number;
+  // Repeats per case. Default 1, for exact backward compatibility (every existing
+  // caller that never passed k keeps running each case exactly once).
+  k?: number;
   onCaseStart?: (caseId: string) => void;
-  onCaseDone?: (result: EvalCaseResult) => void;
+  // Fires after each individual attempt — the live progress signal while a case is
+  // still running its k repeats.
+  onAttemptDone?: (caseId: string, attemptIndex: number, k: number, result: EvalCaseResult) => void;
+  // Fires once per case, after all k attempts — the aggregate a report is built from.
+  onCaseDone?: (aggregate: EvalCaseAggregate) => void;
+}
+
+export function average(values: number[]): number {
+  return values.reduce((sum, v) => sum + v, 0) / values.length;
+}
+
+// Pure: turns a case's k attempt results into the pass@1/pass^k numbers a report reads.
+// Separated from runCaseKTimes below so this math is testable without actually running
+// an eval case (real git worktrees + a real `claude` turn).
+export function aggregateAttempts(caseId: string, attempts: EvalCaseResult[]): EvalCaseAggregate {
+  return {
+    caseId,
+    attempts,
+    passAtOneRate: average(attempts.map((a) => (a.passed ? 1 : 0))),
+    passAtK: attempts.every((a) => a.passed),
+    totalCostUsd: attempts.reduce((sum, a) => sum + a.costUsd, 0),
+  };
+}
+
+async function runCaseKTimes(
+  evalCase: EvalCase,
+  k: number,
+  runOpts: Parameters<typeof runEvalCase>[1],
+  onAttemptDone: RunEvalSuiteOptions["onAttemptDone"],
+): Promise<EvalCaseAggregate> {
+  const attempts: EvalCaseResult[] = [];
+  for (let i = 0; i < k; i++) {
+    const result = await runEvalCase(evalCase, runOpts);
+    attempts.push(result);
+    onAttemptDone?.(evalCase.id, i + 1, k, result);
+  }
+  return aggregateAttempts(evalCase.id, attempts);
 }
 
 const RUNS_DIR = join(HARNESS_STATE_DIR, "eval-runs");
@@ -30,13 +69,16 @@ async function saveRun(result: EvalSuiteResult): Promise<string> {
 // safe to run often, not fast at the cost of flakiness.
 export async function runEvalSuite(caseIds: string[] | undefined, opts: RunEvalSuiteOptions): Promise<{ result: EvalSuiteResult; savedTo: string }> {
   const cases = caseIds && caseIds.length > 0 ? await Promise.all(caseIds.map(loadEvalCase)) : await loadAllEvalCases();
+  const k = opts.k ?? 1;
 
-  const results: EvalCaseResult[] = [];
+  const aggregates: EvalCaseAggregate[] = [];
   for (const evalCase of cases) {
     opts.onCaseStart?.(evalCase.id);
     const repo = opts.repos[evalCase.repo];
     if (!repo?.path) {
-      results.push({
+      // Still shaped as a (single, failed) attempt — a report built from this suite
+      // shouldn't need a separate code path for "never even ran" vs. "ran and failed".
+      const failure: EvalCaseResult = {
         caseId: evalCase.id,
         passed: false,
         stopReason: `repo "${evalCase.repo}" not configured (missing *_REPO_PATH)`,
@@ -45,28 +87,38 @@ export async function runEvalSuite(caseIds: string[] | undefined, opts: RunEvalS
         hiddenTestPassed: false,
         gateResults: [],
         durationMs: 0,
-      });
+      };
+      const aggregate = aggregateAttempts(evalCase.id, [failure]);
+      aggregates.push(aggregate);
+      opts.onCaseDone?.(aggregate);
       continue;
     }
-    const result = await runEvalCase(evalCase, {
-      repoPath: repo.path,
-      model: opts.model,
-      maxIterations: opts.maxIterations,
-      maxBudgetUsd: opts.maxBudgetUsd,
-      acceptanceRunner: repo.acceptanceRunner,
-      repoGates: repo.gates,
-    });
-    results.push(result);
-    opts.onCaseDone?.(result);
+    const aggregate = await runCaseKTimes(
+      evalCase,
+      k,
+      {
+        repoPath: repo.path,
+        model: opts.model,
+        maxIterations: opts.maxIterations,
+        maxBudgetUsd: opts.maxBudgetUsd,
+        acceptanceRunner: repo.acceptanceRunner,
+        repoGates: repo.gates,
+      },
+      opts.onAttemptDone,
+    );
+    aggregates.push(aggregate);
+    opts.onCaseDone?.(aggregate);
   }
 
   const suiteResult: EvalSuiteResult = {
     runAt: new Date().toISOString(),
     model: opts.model,
-    cases: results,
-    passCount: results.filter((r) => r.passed).length,
-    totalCount: results.length,
-    totalCostUsd: results.reduce((sum, r) => sum + r.costUsd, 0),
+    k,
+    cases: aggregates,
+    passAtOneRate: average(aggregates.map((a) => a.passAtOneRate)),
+    passAtKCount: aggregates.filter((a) => a.passAtK).length,
+    totalCount: aggregates.length,
+    totalCostUsd: aggregates.reduce((sum, a) => sum + a.totalCostUsd, 0),
   };
   const savedTo = await saveRun(suiteResult);
   return { result: suiteResult, savedTo };
