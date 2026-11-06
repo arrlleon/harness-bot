@@ -30,6 +30,14 @@ export interface Brief {
 // resolveBrief (queue.ts), once the human has actually picked an option, knows it.
 export interface CloseLoopResumeState {
   sessionId: string;
+  // The exact worktree the paused session's uncommitted (and committed) work is
+  // sitting in. Without this, resuming would fall through to createWorktree() with
+  // the same branch name — which force-removes and recreates whatever's already
+  // registered at that path (see git.ts), silently discarding any uncommitted edits
+  // from iterations before the pause. Reproduced live: a plain `git worktree remove
+  // --force` on a worktree with uncommitted changes actually deletes them, not just
+  // unregisters the directory.
+  worktreeDir: string;
   iteration: number;
   totalCostUsd: number;
   gates: GateSpec[];
@@ -243,12 +251,17 @@ export interface CloseLoopResult {
     | "stuck"
     | "review_blocked"
     | "gate_integrity_violation"
-    | "brief_pending";
+    | "brief_pending"
+    | "rebase_conflict";
   worktreeDir: string;
   // Set only when stopReason is "stuck" — the gate(s) whose failure fingerprint
   // repeated identically across two consecutive iterations, for diagnostics in the
   // Jira comment / Telegram needs_human message.
   stuckGates?: string[];
+  // Set only when stopReason is "rebase_conflict" — raw git output from the failed
+  // rebase, for a human to read (see rebaseOntoFreshBase in git.ts). The worktree
+  // itself is already back in its clean pre-rebase state by the time this is set.
+  rebaseConflictOutput?: string;
   // Set when an acceptance test was successfully written and frozen into the loop as
   // a gate; absent if none was requested, or the write attempt failed (see onLog for
   // why — the loop still proceeds without it rather than failing the whole task).

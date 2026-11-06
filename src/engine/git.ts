@@ -59,6 +59,41 @@ export async function fetchFreshBase(repoPath: string, targetBranch: string): Pr
   return `origin/${targetBranch}`;
 }
 
+export interface RebaseOutcome {
+  conflict: boolean;
+  // Diagnostic text for a human when conflict is true — raw git output, not parsed.
+  output: string;
+}
+
+// Fetches origin/<targetBranch> and rebases the worktree's current branch onto it —
+// used only when RESUMING a paused task (a brief, mid-task), where the worktree may
+// have sat for hours or days while dev moved on. A brand-new worktree never reaches
+// this: it has no commits of its own yet, so there's nothing to replay — see
+// fetchFreshBase for that case instead, which just picks the right starting commit.
+// `--autostash` covers uncommitted work still sitting in the worktree (the common case
+// right after a brief pause, from iterations before the one that raised it): stashed
+// before the rebase, re-applied after.
+//
+// On conflict — either the rebase itself, or the autostash re-applying cleanly rebased
+// commits — aborts back to a clean pre-rebase state rather than leaving the worktree
+// mid-conflict for a human or a later resume to stumble into. `git rebase --abort`
+// restores the autostash too when the rebase itself was still in progress; if the
+// rebase had already finished and only the stash pop conflicted, --abort is a no-op
+// (nothing left "in progress") and a stash is left behind — the caller's escalation
+// message says to check `git stash list` for that case.
+export async function rebaseOntoFreshBase(worktreeDir: string, targetBranch: string): Promise<RebaseOutcome> {
+  await execFileAsync("git", ["fetch", "origin", targetBranch], { cwd: worktreeDir });
+  try {
+    const { stdout, stderr } = await execFileAsync("git", ["rebase", "--autostash", `origin/${targetBranch}`], { cwd: worktreeDir });
+    return { conflict: false, output: stdout + stderr };
+  } catch (err) {
+    const e = err as { stdout?: string; stderr?: string; message: string };
+    const output = [e.stdout, e.stderr].filter(Boolean).join("\n") || e.message;
+    await execFileAsync("git", ["rebase", "--abort"], { cwd: worktreeDir }).catch(() => {});
+    return { conflict: true, output };
+  }
+}
+
 export async function removeWorktree(repoPath: string, worktreeDir: string): Promise<void> {
   await execFileAsync("git", ["worktree", "remove", "--force", worktreeDir], { cwd: repoPath });
 }

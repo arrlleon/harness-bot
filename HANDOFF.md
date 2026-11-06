@@ -148,7 +148,7 @@ src/
     guardrails.ts      — DEFAULT_DENIED_PATHS (миграции/.env/CI/lock-файлы/ключи)
     checkpoint.ts      — механический checkpoint на диске, recoverOrphanedCheckpoints()
     agentContext.ts    — per-task/per-role scratch (.harness-state/tasks/<KEY>/<role>/)
-    git.ts             — worktree create/remove, commitAll, getWorktreeDiff, deleteBranch, fetchFreshBase
+    git.ts             — worktree create/remove, commitAll, getWorktreeDiff, deleteBranch, fetchFreshBase, rebaseOntoFreshBase
 
   bot/
     bot.ts             — ВСЯ Telegram-логика: команды, кнопки, персонаж "Зам. CEO", classifyMessage
@@ -234,13 +234,25 @@ worktree add/remove`) рядом с основным чекаутом репоз
 чтобы знать, куда смотреть.
 
 - **Пауза и резюме (`resumeFrom` в `EngineConfig`, `CloseLoopResumeState`)**
-  — используется и брифами, и (частично) ревью-циклом. `runCloseLoop` умеет
-  не только идти от начала до конца, но и продолжаться с середины той же
-  сессии `claude` (`--resume`), без пересчёта baseline/acceptance-теста.
-  Если трогаешь `loop.ts` — помни, что есть три входа: с нуля, `resumeFrom`
-  на основной цикл реализации, и `resumeFrom.reviewResume` на раунд правки по
+  — используется брифами (все три места, см. ниже). `runCloseLoop` умеет не
+  только идти от начала до конца, но и продолжаться с середины той же сессии
+  `claude` (`--resume`), без пересчёта baseline/acceptance-теста. Если
+  трогаешь `loop.ts` — помни, что есть три входа: с нуля, `resumeFrom` на
+  основной цикл реализации, и `resumeFrom.reviewResume` на раунд правки по
   замечаниям ревью (`runPostImplementSuccess`) — все три должны остаться
-  консистентными.
+  консистентными. **`CloseLoopResumeState.worktreeDir` обязателен не
+  случайно** — был реальный баг (найден и исправлен при разборе самого
+  механизма, не вживую на бою): без него резюме падало в `createWorktree()`,
+  который форсированно пересоздаёт worktree по тому же пути — тихо стирая
+  незакоммиченную работу итераций до паузы. Если когда-нибудь будешь менять
+  resume-путь — `worktreeDir` должен прийти ПЕРВЫМ в приоритете перед
+  `existingWorktreeDir`/`createWorktree`, не наоборот. Следом, на том же
+  входе, идёт `rebaseOntoFreshBase()` (если `config.freshBase` включён) —
+  пауза может длиться часы/дни, и ребейз на свежий `origin/<target>` при
+  резюме — то, что реально держит ветку задачи неразошедшейся с `dev` к
+  моменту финального пуша. Конфликт → `stopReason: "rebase_conflict"` →
+  существующий флоу "нужен человек", worktree уже в чистом состоянии
+  (`rebaseOntoFreshBase` сам откатывает ребейз при неудаче).
 - **Брифы** (`brief.ts`) — работают и в основном ходу implement, и в
   ревью-фикс-раунде (`runPostImplementSuccess` в `loop.ts`,
   `CloseLoopResumeState.reviewResume`), и для обеих половин кросс-репо задач
@@ -302,12 +314,6 @@ Explore QA) и **ЕТС Тендер "Флот ИИ-агентов"** (боев�
 - **Онбординг нового репозитория — вручную.** Третий репозиторий (не
   back-ai/front-ai) потребует ручной правки `config.ts` (`RepoKind`
   захардкожен на `backend`/`frontend`), а не скрипта-скана проекта.
-- **Свежая база (`fetchFreshBase`, см. §6) не покрывает возобновление после
-  паузы.** Закрывает только "локальный чекаут устарел ко старту задачи" — у
-  задачи, которая часами/днями ждала ответа на бриф или решения человека по
-  `needs_human`, `dev` мог уйти вперёд уже ПОСЛЕ старта, а resume переиспользует
-  тот же worktree как есть. Настоящий rebase с обработкой конфликтов на уже
-  закоммиченной/незакоммиченной работе — отдельная, более сложная задача.
 - **Дашборд — только localhost**, доступ с телефона требует туннель
   (ngrok/cloudflared), не настроено.
 

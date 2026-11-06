@@ -11,7 +11,7 @@ import type {
 import { runClaudeTurn } from "./claudeEngine.js";
 import { establishBaselines, runGates } from "./verify.js";
 import { buildFeedbackPrompt, buildInitialPrompt } from "./prompts.js";
-import { createWorktree, commitAll, fetchFreshBase } from "./git.js";
+import { createWorktree, commitAll, fetchFreshBase, rebaseOntoFreshBase } from "./git.js";
 import { writeAcceptanceTest } from "./acceptanceTest.js";
 import { readMemoryFiles, buildMemoryContextBlock, updateProjectMemory } from "./memory.js";
 import { fingerprintFailure } from "./stuckDetector.js";
@@ -181,6 +181,7 @@ async function runPostImplementSuccess(
           brief,
           resumeState: {
             sessionId: resumeSessionId,
+            worktreeDir,
             iteration: iterations.length,
             totalCostUsd,
             gates,
@@ -258,16 +259,49 @@ async function runPostImplementSuccess(
 }
 
 export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promise<CloseLoopResult> {
-  // Only applies to a genuinely new worktree — existingWorktreeDir means resuming one
-  // that may already have in-progress or committed work on it, where fetching and
-  // moving the branch point is a rebase-with-conflicts problem, not a simple fetch.
+  // config.resumeFrom?.worktreeDir takes priority: resuming a brief (main loop, review
+  // round, or cross-repo) must reuse the exact worktree the paused session's
+  // uncommitted work is sitting in. createWorktree() force-removes and recreates
+  // whatever's already registered at that path (see git.ts and CloseLoopResumeState's
+  // own comment) — calling it again here would silently discard that work before the
+  // resumed turn even runs. config.existingWorktreeDir is the other, unrelated reason
+  // to skip creating a worktree: the eval harness (runCase.ts) pins one to a specific
+  // historical commit up front. Only a genuinely new task reaches createWorktree() at
+  // all, which is also the only case fetching a fresh base point makes sense — a
+  // worktree with no commits of its own has nothing to rebase.
   const worktreeDir =
+    config.resumeFrom?.worktreeDir ??
     config.existingWorktreeDir ??
     (await createWorktree(
       config.repoPath,
       config.branchName,
       config.freshBase ? await fetchFreshBase(config.repoPath, config.freshBase.baseBranch) : undefined,
     ));
+
+  // A resume (any of the three kinds) can have sat paused for hours or days waiting on
+  // a human — long enough for dev to move well past where this worktree started.
+  // Rebasing here, once, right as work picks back up, is the resume-side half of
+  // fetchFreshBase above: that one only ever runs once, at a brand-new task's very
+  // start, with nothing of its own yet to replay. On conflict, stop immediately and
+  // escalate — same reasoning as a review-fix round breaking a gate: a human has more
+  // context to resolve a real conflict than another blind retry would, and the
+  // worktree is already back in its clean pre-rebase state (rebaseOntoFreshBase aborts
+  // on failure), so nothing here is left half-done.
+  if (config.resumeFrom && config.freshBase) {
+    const rebase = await rebaseOntoFreshBase(worktreeDir, config.freshBase.baseBranch);
+    if (rebase.conflict) {
+      return {
+        task,
+        success: false,
+        iterations: [],
+        totalCostUsd: config.resumeFrom.totalCostUsd,
+        stopReason: "rebase_conflict",
+        worktreeDir,
+        acceptanceTestPath: config.resumeFrom.acceptanceTestPath,
+        rebaseConflictOutput: rebase.output,
+      };
+    }
+  }
 
   // Resuming a brief raised during the review<->fix loop's own fix turn — the main
   // implement loop, acceptance test, baseline, and gate-integrity check already ran
@@ -405,7 +439,7 @@ export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promis
         worktreeDir,
         acceptanceTestPath,
         brief,
-        resumeState: { sessionId: resumeSessionId, iteration: i, totalCostUsd, gates, baselines, extraDeniedPaths, acceptanceTestPath, previousFingerprint },
+        resumeState: { sessionId: resumeSessionId, worktreeDir, iteration: i, totalCostUsd, gates, baselines, extraDeniedPaths, acceptanceTestPath, previousFingerprint },
       };
     }
 

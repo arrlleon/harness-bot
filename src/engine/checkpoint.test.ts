@@ -136,7 +136,7 @@ test("recoverOrphanedCheckpoints skips an issue that already has a pendingBrief"
     worktreeDir: "/tmp/does-not-need-to-exist-for-this-test",
     branchName: "harness/xen-104",
     gitlabProjectPath: "saqr/back-ai",
-    resumeState: { sessionId: "sess-1", iteration: 1, totalCostUsd: 0.1, gates: [], baselines: [] },
+    resumeState: { sessionId: "sess-1", worktreeDir: "/tmp/does-not-need-to-exist-for-this-test", iteration: 1, totalCostUsd: 0.1, gates: [], baselines: [] },
   });
   checkpoint.writeCheckpoint(sampleCheckpoint("XEN-104"));
 

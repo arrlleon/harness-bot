@@ -6,7 +6,17 @@ import { mkdtemp, writeFile, readFile, rm, mkdir, realpath } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { createWorktree, removeWorktree, deleteBranch, commitAll, getWorktreeDiff, worktreeDirFor, restorePathsFromCommit, fetchFreshBase } from "./git.js";
+import {
+  createWorktree,
+  removeWorktree,
+  deleteBranch,
+  commitAll,
+  getWorktreeDiff,
+  worktreeDirFor,
+  restorePathsFromCommit,
+  fetchFreshBase,
+  rebaseOntoFreshBase,
+} from "./git.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -128,7 +138,10 @@ test("createWorktree recovers from a stale worktree registration (prior crashed 
     // Calling createWorktree again for the same branch must not throw "already exists".
     const second = await createWorktree(repo, branch);
     assert.equal(await realpath(second), await realpath(worktreeDirFor(branch)));
-    // The force-recreate wipes whatever the previous run left behind.
+    // The force-recreate wipes whatever the previous run left behind — exactly the
+    // behavior that makes this safe for a crashed/abandoned run, but destructive for a
+    // live one: runCloseLoop must never reach this branch while resuming a brief
+    // (reproduced live — see CloseLoopResumeState.worktreeDir's own comment).
     await assert.rejects(readFile(join(second, "scratch.txt"), "utf8"));
   } finally {
     await cleanup(repo, branch);
@@ -268,6 +281,80 @@ test("fetchFreshBase returns a ref pointing at the remote's real current tip, pa
     const dir = await createWorktree(local, branch, ref);
     const content = await readFile(join(dir, "README.md"), "utf8");
     assert.equal(content, "initial\nnewer on origin\n");
+  } finally {
+    await cleanup(local, branch);
+    await rm(origin, { recursive: true, force: true });
+  }
+});
+
+test("rebaseOntoFreshBase cleanly replays worktree work onto new remote commits, keeping uncommitted changes", async () => {
+  const { origin, local } = await makeRepoWithRemote();
+  const branch = uniqueBranch();
+  try {
+    const dir = await createWorktree(local, branch);
+    await writeFile(join(dir, "worktree-change.txt"), "from the worktree\n");
+    await execFileAsync("git", ["add", "-A"], { cwd: dir });
+    await execFileAsync("git", ["commit", "-q", "-m", "worktree change"], { cwd: dir });
+    await writeFile(join(dir, "uncommitted.txt"), "not yet committed\n");
+
+    // A real regression had this: another task (or a human) pushes straight to dev
+    // while this worktree, paused on a brief, sits untouched — unrelated to the
+    // worktree's own change, so this should rebase clean.
+    await pushDirectlyToOrigin(origin, "initial\nnewer on origin\n");
+
+    const outcome = await rebaseOntoFreshBase(dir, "dev");
+    assert.equal(outcome.conflict, false);
+
+    const readme = await readFile(join(dir, "README.md"), "utf8");
+    assert.equal(readme, "initial\nnewer on origin\n");
+    const worktreeChange = await readFile(join(dir, "worktree-change.txt"), "utf8");
+    assert.equal(worktreeChange, "from the worktree\n");
+    // The autostash round-trip must hand uncommitted work back, not just the commits.
+    const uncommitted = await readFile(join(dir, "uncommitted.txt"), "utf8");
+    assert.equal(uncommitted, "not yet committed\n");
+  } finally {
+    await cleanup(local, branch);
+    await rm(origin, { recursive: true, force: true });
+  }
+});
+
+test("rebaseOntoFreshBase is a safe no-op when the remote has nothing new", async () => {
+  const { origin, local } = await makeRepoWithRemote();
+  const branch = uniqueBranch();
+  try {
+    const dir = await createWorktree(local, branch);
+    const outcome = await rebaseOntoFreshBase(dir, "dev");
+    assert.equal(outcome.conflict, false);
+  } finally {
+    await cleanup(local, branch);
+    await rm(origin, { recursive: true, force: true });
+  }
+});
+
+test("rebaseOntoFreshBase detects a real conflict and leaves the worktree back in its clean pre-rebase state", async () => {
+  const { origin, local } = await makeRepoWithRemote();
+  const branch = uniqueBranch();
+  try {
+    const dir = await createWorktree(local, branch);
+    await writeFile(join(dir, "README.md"), "initial\nfrom the worktree\n");
+    await execFileAsync("git", ["commit", "-qam", "worktree edits the same line"], { cwd: dir });
+
+    // Origin edits the exact same line a different way — a genuine conflict, not
+    // just two unrelated changes landing near each other.
+    await pushDirectlyToOrigin(origin, "initial\nfrom origin\n");
+
+    const outcome = await rebaseOntoFreshBase(dir, "dev");
+    assert.equal(outcome.conflict, true);
+    assert.match(outcome.output, /conflict/i);
+
+    // Aborted back to exactly where it was — the worktree's own content, no
+    // half-finished rebase left for a human (or a later resume) to find.
+    const readme = await readFile(join(dir, "README.md"), "utf8");
+    assert.equal(readme, "initial\nfrom the worktree\n");
+    const { stdout: status } = await execFileAsync("git", ["status", "--porcelain=v1"], { cwd: dir });
+    assert.equal(status.trim(), "");
+    const { stdout: branchStatus } = await execFileAsync("git", ["status"], { cwd: dir });
+    assert.doesNotMatch(branchStatus, /rebas(e|ing)/i);
   } finally {
     await cleanup(local, branch);
     await rm(origin, { recursive: true, force: true });

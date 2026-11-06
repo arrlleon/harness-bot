@@ -577,6 +577,8 @@ async function closeLoopAndPush(
       reason = `gate_integrity_violation: ${result.gateIntegrityViolations.join("; ")}`;
     } else if (result.stopReason === "context_budget" && result.contextTokens) {
       reason = `context_budget: session reached ~${Math.round(result.contextTokens / 1000)}k tokens, stopped before quality degrades further`;
+    } else if (result.stopReason === "rebase_conflict" && result.rebaseConflictOutput) {
+      reason = `rebase_conflict (dev moved on while this was paused, and the two don't merge cleanly): ${result.rebaseConflictOutput.slice(0, 1000)}`;
     }
     return { closeLoopResult: result, failureReason: reason, failureKind: "loop" };
   }
