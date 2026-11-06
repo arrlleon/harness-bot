@@ -13,6 +13,12 @@ import { getLiveState, setPendingHumanReview, HARNESS_STATE_DIR } from "../bot/l
 export interface Checkpoint {
   issueKey: string;
   title: string;
+  // Carried along so a checkpoint recovered after a crash can still generate the same
+  // testingNotes/closeReport attachment a normal close would — without this, a
+  // crash-recovered needs_human had no way to reconstruct the real task context, only
+  // the bare title.
+  description: string;
+  acceptanceCriteria: string[];
   branchName: string;
   worktreeDir: string;
   gitlabProjectPath: string;
@@ -91,6 +97,8 @@ export function recoverOrphanedCheckpoints(): RecoveredCheckpoint[] {
       worktreeDir: cp.worktreeDir,
       branchName: cp.branchName,
       gitlabProjectPath: cp.gitlabProjectPath,
+      description: cp.description,
+      acceptanceCriteria: cp.acceptanceCriteria,
     });
     clearCheckpoint(cp.issueKey);
     recovered.push({ checkpoint: cp, reason });

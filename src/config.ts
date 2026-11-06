@@ -143,6 +143,11 @@ export const config = {
   // message with a few plain-language sentences for whoever asked for the ticket —
   // one more read-only turn per successful task, same cost tier as testing notes.
   closeReportEnabled: (process.env.CLOSE_REPORT_ENABLED ?? "true") !== "false",
+  // Same shape, same default. No extra LLM turn — composes the closeReport/testingNotes
+  // text already generated for this task into one file, attached to the Jira issue the
+  // moment it leaves "in progress", so a tester opens the ticket to a document instead
+  // of having to read the comment thread.
+  workReportEnabled: (process.env.WORK_REPORT_ENABLED ?? "true") !== "false",
   // Same opt-out shape, but this one is pure diff parsing — no extra LLM turn, no extra
   // cost or latency — so there's little reason to turn it off outside of debugging it.
   gateIntegrityCheckEnabled: (process.env.GATE_INTEGRITY_CHECK_ENABLED ?? "true") !== "false",

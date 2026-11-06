@@ -21,6 +21,9 @@ import {
   clearPendingBrief,
 } from "./bot/liveState.js";
 import { commitAll, deleteBranch, getWorktreeDiff, removeWorktree, worktreeDirFor } from "./engine/git.js";
+import { buildWorkReportDocument, workReportFilename } from "./engine/workReport.js";
+import { generateTestingNotes } from "./engine/testingNotes.js";
+import { generateCloseReport } from "./engine/closeReport.js";
 import { writeCheckpoint, clearCheckpoint } from "./engine/checkpoint.js";
 import { loadState, costSince, countSince, startOfTodayIso, estimateCost, type CostEstimate } from "./bot/state.js";
 import type { CloseLoopResult, EngineConfig, GateSpec, QueueRunOutcome, TaskSpec } from "./types.js";
@@ -516,6 +519,8 @@ async function closeLoopAndPush(
     writeCheckpoint({
       issueKey: issue.key,
       title: issue.summary,
+      description: task.description,
+      acceptanceCriteria: task.acceptanceCriteria,
       branchName,
       worktreeDir,
       gitlabProjectPath: repo.gitlabProjectPath,
@@ -689,6 +694,8 @@ async function handleCloseLoopOutcome(
       worktreeDir: result.worktreeDir,
       branchName,
       gitlabProjectPath: repo.gitlabProjectPath,
+      description: task.description,
+      acceptanceCriteria: task.acceptanceCriteria,
     });
     // pendingHumanReview is now the durable record for this task — the checkpoint
     // would just be redundant from here (recoverOrphanedCheckpoints already skips an
@@ -711,6 +718,7 @@ async function handleCloseLoopOutcome(
     issue.key,
     `jira-harness opened ${outcome.mrUrl} (cost: $${result.totalCostUsd.toFixed(4)})${testingNotesSection(result.testingNotes)}`,
   );
+  await attachWorkReport(jira, issue, task, { closeReport: result.closeReport, testingNotes: result.testingNotes });
   await jira.transitionTo(issue.key, config.jira.reviewStatus);
   await cleanupWorktree(repo.path, result.worktreeDir, branchName);
   clearCheckpoint(issue.key);
@@ -729,6 +737,59 @@ async function handleCloseLoopOutcome(
 // to go dig through the MR, so it rides along in the same comment as the MR link.
 function testingNotesSection(notes: string | undefined): string {
   return notes ? `\n\nКак тестировать:\n${notes}` : "";
+}
+
+// Shared by the single-repo and cross-repo success paths — attaches the composed
+// closeReport/testingNotes document to the Jira issue right as it leaves "in progress",
+// so a tester opens the ticket to a document instead of digging through the comment
+// thread. No extra LLM turn (reuses text already generated), and never blocks the task
+// closing: a failed upload (Jira attachments disabled server-side, a permissions issue)
+// is logged and swallowed, same as a failed testingNotes/closeReport turn itself.
+// Used only by resolveHumanReview's accept path below — the normal close flow already
+// has testingNotes/closeReport generated as part of runCloseLoop itself (see
+// runPostImplementSuccess), but a human-accepted needs_human never went through that
+// loop at all, so there's nothing to attach yet. Generates them fresh from the final,
+// already-committed worktree before composing the same attachment a normal close gets.
+// Best-effort like attachWorkReport itself: any failure here is logged and swallowed,
+// never blocks accepting the task.
+async function generateAndAttachWorkReport(
+  jira: JiraClient,
+  issue: { key: string; summary: string },
+  task: TaskSpec,
+  worktreeDir: string,
+): Promise<void> {
+  let testingNotes: string | undefined;
+  let closeReport: string | undefined;
+  try {
+    if (config.testingNotesEnabled) {
+      const result = await generateTestingNotes(worktreeDir, task, { model: config.models.testing, baseBranch: config.gitlab.targetBranch });
+      testingNotes = result.notes;
+    }
+    if (config.closeReportEnabled) {
+      const result = await generateCloseReport(worktreeDir, task, { model: config.models.report, baseBranch: config.gitlab.targetBranch });
+      closeReport = result.report;
+    }
+  } catch (err) {
+    appendLog(`⚠️ Не удалось сгенерировать отчёт для ${issue.key} после ручного принятия: ${(err as Error).message}`);
+    return;
+  }
+  await attachWorkReport(jira, issue, task, { testingNotes, closeReport });
+}
+
+async function attachWorkReport(
+  jira: JiraClient,
+  issue: { key: string; summary: string },
+  task: { id: string; title: string },
+  pieces: { closeReport?: string; testingNotes?: string },
+): Promise<void> {
+  if (!config.workReportEnabled) return;
+  const document = buildWorkReportDocument(task, pieces);
+  if (!document) return;
+  try {
+    await jira.addAttachment(issue.key, workReportFilename(issue.key), document);
+  } catch (err) {
+    appendLog(`⚠️ Не удалось прикрепить отчёт к ${issue.key}: ${(err as Error).message}`);
+  }
 }
 
 // Cross-repo: backend and frontend each run their own independent review, under the
@@ -836,6 +897,8 @@ async function afterBackendAttempt(
       worktreeDir: backendResult.worktreeDir,
       branchName: backend.branchName,
       gitlabProjectPath: backend.repo.gitlabProjectPath,
+      description: backend.task.description,
+      acceptanceCriteria: backend.task.acceptanceCriteria,
     });
     clearCheckpoint(issue.key);
     return {
@@ -955,6 +1018,8 @@ async function afterFrontendAttempt(
       worktreeDir: frontendResult.worktreeDir,
       branchName: frontend.branchName,
       gitlabProjectPath: frontend.repo.gitlabProjectPath,
+      description: frontend.task.description,
+      acceptanceCriteria: frontend.task.acceptanceCriteria,
     });
     clearCheckpoint(issue.key);
     return {
@@ -988,6 +1053,12 @@ async function afterFrontendAttempt(
       `frontend: ${frontendOutcome.mrUrl}`,
       `cost: $${totalCostUsd.toFixed(4)}`,
     ].join("\n") + testingNotesSection(crossRepoNotes || undefined),
+  );
+  await attachWorkReport(
+    jira,
+    issue,
+    { id: issue.key, title: issue.summary },
+    { closeReport: crossRepoReport || undefined, testingNotes: crossRepoNotes || undefined },
   );
   await jira.transitionTo(issue.key, config.jira.reviewStatus);
   await cleanupWorktree(frontend.repo.path, frontendResult.worktreeDir, frontend.branchName);
@@ -1034,6 +1105,12 @@ export async function resolveHumanReview(accept: boolean): Promise<{ mrUrl: stri
     description: `Automated by jira-harness for ${pending.issueKey}, accepted by a human after: ${pending.reason}.`,
   });
   await jira.addComment(pending.issueKey, `jira-harness opened ${mr.webUrl} (accepted by a human after ${pending.reason})`);
+  await generateAndAttachWorkReport(
+    jira,
+    { key: pending.issueKey, summary: pending.title },
+    { id: pending.issueKey, title: pending.title, description: pending.description, acceptanceCriteria: pending.acceptanceCriteria },
+    pending.worktreeDir,
+  );
   await jira.transitionTo(pending.issueKey, config.jira.reviewStatus);
   await cleanupWorktree(repoPath, pending.worktreeDir, pending.branchName);
   return { mrUrl: mr.webUrl };

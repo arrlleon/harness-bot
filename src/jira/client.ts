@@ -96,4 +96,25 @@ export class JiraClient {
       body: JSON.stringify({ body }),
     });
   }
+
+  // Multipart upload, deliberately not going through request() above: that method
+  // always forces Content-Type: application/json, which would corrupt a multipart
+  // body — fetch needs to set its own Content-Type (with the multipart boundary) from
+  // the FormData itself. Jira's attachment endpoint also requires the X-Atlassian-Token
+  // header specifically (its own XSRF check, separate from Bearer auth) or it 403s.
+  async addAttachment(issueKey: string, filename: string, content: string, contentType = "text/plain; charset=utf-8"): Promise<void> {
+    const form = new FormData();
+    form.append("file", new Blob([content], { type: contentType }), filename);
+    const res = await fetch(`${this.baseUrl}/rest/api/2/issue/${issueKey}/attachments`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.token}`,
+        "X-Atlassian-Token": "no-check",
+      },
+      body: form,
+    });
+    if (!res.ok) {
+      throw new Error(`Jira attachment upload for ${issueKey} -> ${res.status}: ${await res.text()}`);
+    }
+  }
 }

@@ -70,6 +70,11 @@ export interface PendingHumanReview {
   worktreeDir: string;
   branchName: string;
   gitlabProjectPath: string;
+  // Needed only if a human accepts: resolveHumanReview then generates testingNotes/
+  // closeReport for the attachment the same way a normal close does, and those prompts
+  // need the real task context, not just the title.
+  description: string;
+  acceptanceCriteria: string[];
 }
 
 // A brief the implement turn raised instead of guessing — paused mid-task, not failed:

@@ -29,6 +29,8 @@ function sampleCheckpoint(issueKey: string) {
   return {
     issueKey,
     title: "Fix the thing",
+    description: "Full task description for this fixture.",
+    acceptanceCriteria: ["Criterion one"],
     branchName: `harness/${issueKey.toLowerCase()}`,
     worktreeDir: "/tmp/does-not-need-to-exist-for-this-test",
     gitlabProjectPath: "saqr/back-ai",
@@ -70,6 +72,10 @@ test("recoverOrphanedCheckpoints converts an orphaned checkpoint into pendingHum
   assert.equal(pending?.issueKey, "XEN-101");
   assert.equal(pending?.worktreeDir, cp.worktreeDir);
   assert.equal(pending?.gitlabProjectPath, cp.gitlabProjectPath);
+  // Carried through from the checkpoint — without this, an accept after a crash
+  // recovery would have no task context for the testingNotes/closeReport attachment.
+  assert.equal(pending?.description, cp.description);
+  assert.deepEqual(pending?.acceptanceCriteria, cp.acceptanceCriteria);
 
   // The checkpoint file itself is consumed — pendingHumanReview now owns this worktree.
   assert.equal(existsSync(join(stateDir, "checkpoints", "XEN-101.json")), false);
@@ -87,6 +93,8 @@ test("recoverOrphanedCheckpoints skips an issue that already has a pendingHumanR
     worktreeDir: "/tmp/already-set",
     branchName: "harness/xen-102",
     gitlabProjectPath: "saqr/back-ai",
+    description: "Full task description for this fixture.",
+    acceptanceCriteria: ["Criterion one"],
   });
   checkpoint.writeCheckpoint(sampleCheckpoint("XEN-102"));
 
