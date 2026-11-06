@@ -138,6 +138,11 @@ export const config = {
   // Same opt-out shape, but this one is pure diff parsing — no extra LLM turn, no extra
   // cost or latency — so there's little reason to turn it off outside of debugging it.
   gateIntegrityCheckEnabled: (process.env.GATE_INTEGRITY_CHECK_ENABLED ?? "true") !== "false",
+  // Same opt-out shape. One extra `git fetch` per new task (no LLM turn) — fetches
+  // GITLAB_TARGET_BRANCH and branches the new worktree from there instead of repoPath's
+  // possibly-stale local HEAD, so gates/acceptance tests run against what the MR will
+  // actually be merged into, not whatever a human last happened to have checked out.
+  freshBaseEnabled: (process.env.FRESH_BASE_ENABLED ?? "true") !== "false",
   maxIterations: Number(process.env.MAX_ITERATIONS ?? 5),
   maxBudgetUsd: Number(process.env.MAX_BUDGET_USD ?? 5),
   // A resumed session's answer quality degrades well before this many tokens would

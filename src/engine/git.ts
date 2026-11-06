@@ -44,6 +44,21 @@ export async function createWorktree(repoPath: string, branchName: string, start
   return dir;
 }
 
+// The harness never fetches or pulls repoPath's main checkout on its own otherwise —
+// its local HEAD can be arbitrarily stale (days old) by the time a new task branches
+// from it, which means gates/acceptance tests then run against code that's already
+// behind whatever the eventual MR will actually be merged into. Fetching the target
+// branch and handing back its remote-tracking ref as createWorktree's startPoint closes
+// that gap: the ref it returns is a literal `origin/<branch>` name, not a resolved SHA,
+// so it always means "whatever fetch just saw" at the moment it's used a line later.
+// Modeled on Avengers Harness's "rebase onto fresh dev before gates" rule, but simpler
+// here: a worktree with zero commits of its own has nothing to replay, so there's no
+// rebase conflict to resolve — it only has to start from the right commit.
+export async function fetchFreshBase(repoPath: string, targetBranch: string): Promise<string> {
+  await execFileAsync("git", ["fetch", "origin", targetBranch], { cwd: repoPath });
+  return `origin/${targetBranch}`;
+}
+
 export async function removeWorktree(repoPath: string, worktreeDir: string): Promise<void> {
   await execFileAsync("git", ["worktree", "remove", "--force", worktreeDir], { cwd: repoPath });
 }

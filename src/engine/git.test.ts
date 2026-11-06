@@ -6,7 +6,7 @@ import { mkdtemp, writeFile, readFile, rm, mkdir, realpath } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { createWorktree, removeWorktree, deleteBranch, commitAll, getWorktreeDiff, worktreeDirFor, restorePathsFromCommit } from "./git.js";
+import { createWorktree, removeWorktree, deleteBranch, commitAll, getWorktreeDiff, worktreeDirFor, restorePathsFromCommit, fetchFreshBase } from "./git.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -28,6 +28,46 @@ async function makeRepo(): Promise<string> {
 
 function uniqueBranch(): string {
   return `test/${randomUUID()}`;
+}
+
+// For fetchFreshBase tests: a bare "origin" plus a local clone of it on branch "dev" —
+// the local clone's HEAD can legitimately go stale relative to origin once something
+// else pushes directly to it, which is the exact gap fetchFreshBase closes.
+async function makeRepoWithRemote(): Promise<{ origin: string; local: string }> {
+  const origin = await mkdtemp(join(tmpdir(), "jira-harness-git-origin-"));
+  await execFileAsync("git", ["init", "-q", "--bare"], { cwd: origin });
+
+  const seed = await mkdtemp(join(tmpdir(), "jira-harness-git-seed-"));
+  await execFileAsync("git", ["init", "-q"], { cwd: seed });
+  await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: seed });
+  await execFileAsync("git", ["config", "user.name", "Test"], { cwd: seed });
+  await writeFile(join(seed, "README.md"), "initial\n");
+  await execFileAsync("git", ["add", "-A"], { cwd: seed });
+  await execFileAsync("git", ["commit", "-q", "-m", "initial"], { cwd: seed });
+  await execFileAsync("git", ["branch", "-M", "dev"], { cwd: seed });
+  await execFileAsync("git", ["remote", "add", "origin", origin], { cwd: seed });
+  await execFileAsync("git", ["push", "-q", "origin", "dev"], { cwd: seed });
+  await rm(seed, { recursive: true, force: true });
+
+  const local = await mkdtemp(join(tmpdir(), "jira-harness-git-local-"));
+  await execFileAsync("git", ["clone", "-q", "-b", "dev", origin, local]);
+  await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: local });
+  await execFileAsync("git", ["config", "user.name", "Test"], { cwd: local });
+  return { origin, local };
+}
+
+// Simulates someone else pushing straight to origin/dev while `local` never pulls —
+// a throwaway clone pushes, rather than pushing from `local` itself, so `local`'s own
+// HEAD and refs stay exactly as stale as a real harness host's would.
+async function pushDirectlyToOrigin(origin: string, newContent: string): Promise<void> {
+  const other = await mkdtemp(join(tmpdir(), "jira-harness-git-other-"));
+  await execFileAsync("git", ["clone", "-q", "-b", "dev", origin, other]);
+  await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: other });
+  await execFileAsync("git", ["config", "user.name", "Test"], { cwd: other });
+  await writeFile(join(other, "README.md"), newContent);
+  await execFileAsync("git", ["commit", "-q", "-am", "pushed directly to origin"], { cwd: other });
+  await execFileAsync("git", ["push", "-q", "origin", "dev"], { cwd: other });
+  await rm(other, { recursive: true, force: true });
 }
 
 async function cleanup(repoPath: string, branchName: string): Promise<void> {
@@ -196,6 +236,41 @@ test("createWorktree accepts a startPoint and checks out that historical commit,
     assert.equal(content, "initial\n"); // the pre-"later change" state, not current HEAD
   } finally {
     await cleanup(repo, branch);
+  }
+});
+
+test("without fetchFreshBase, a stale local checkout branches a new task from its own outdated HEAD", async () => {
+  const { origin, local } = await makeRepoWithRemote();
+  const branch = uniqueBranch();
+  try {
+    await pushDirectlyToOrigin(origin, "initial\nnewer on origin\n");
+
+    // No fetchFreshBase call — createWorktree's default behavior (no startPoint),
+    // exactly what a real task's worktree creation does without this feature.
+    const dir = await createWorktree(local, branch);
+    const content = await readFile(join(dir, "README.md"), "utf8");
+    assert.equal(content, "initial\n"); // still the stale commit — confirms the gap is real
+  } finally {
+    await cleanup(local, branch);
+    await rm(origin, { recursive: true, force: true });
+  }
+});
+
+test("fetchFreshBase returns a ref pointing at the remote's real current tip, past a stale local HEAD", async () => {
+  const { origin, local } = await makeRepoWithRemote();
+  const branch = uniqueBranch();
+  try {
+    await pushDirectlyToOrigin(origin, "initial\nnewer on origin\n");
+
+    const ref = await fetchFreshBase(local, "dev");
+    assert.equal(ref, "origin/dev");
+
+    const dir = await createWorktree(local, branch, ref);
+    const content = await readFile(join(dir, "README.md"), "utf8");
+    assert.equal(content, "initial\nnewer on origin\n");
+  } finally {
+    await cleanup(local, branch);
+    await rm(origin, { recursive: true, force: true });
   }
 });
 

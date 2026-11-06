@@ -90,6 +90,14 @@ export interface EngineConfig {
   // before the loop's own baseline ever runs, while reusing the entire rest of the
   // production iteration/budget/stuck-detector/commit pipeline unchanged.
   existingWorktreeDir?: string;
+  // Absent means createWorktree branches from repoPath's current local HEAD, same as
+  // always. Present means fetching origin/<baseBranch> first and branching from THAT
+  // instead — repoPath's local checkout is never otherwise fetched/pulled by the
+  // harness, so its HEAD can be arbitrarily stale by the time a new task starts. Has no
+  // effect when existingWorktreeDir is set (resuming an already-created worktree) —
+  // rebasing committed/in-progress work onto a moving base mid-task is a different,
+  // harder problem this doesn't attempt.
+  freshBase?: { baseBranch: string };
   // Present when this call is resuming after a brief was answered — skips acceptance-
   // test writing, baseline establishment, and memory reading (all already done before
   // the pause) and picks the iteration loop back up with `prompt` (the human's answer,

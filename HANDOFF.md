@@ -148,7 +148,7 @@ src/
     guardrails.ts      — DEFAULT_DENIED_PATHS (миграции/.env/CI/lock-файлы/ключи)
     checkpoint.ts      — механический checkpoint на диске, recoverOrphanedCheckpoints()
     agentContext.ts    — per-task/per-role scratch (.harness-state/tasks/<KEY>/<role>/)
-    git.ts             — worktree create/remove, commitAll, getWorktreeDiff, deleteBranch
+    git.ts             — worktree create/remove, commitAll, getWorktreeDiff, deleteBranch, fetchFreshBase
 
   bot/
     bot.ts             — ВСЯ Telegram-логика: команды, кнопки, персонаж "Зам. CEO", classifyMessage
@@ -297,6 +297,12 @@ Explore QA) и **ЕТС Тендер "Флот ИИ-агентов"** (боев�
   просто ничего не агрегируется и не показывается.
 - **Брифы не one-click для кросс-репо задач** (см. §6) и не работают внутри
   ревью-фикс-раунда.
+- **Свежая база (`fetchFreshBase`, см. §6) не покрывает возобновление после
+  паузы.** Закрывает только "локальный чекаут устарел ко старту задачи" — у
+  задачи, которая часами/днями ждала ответа на бриф или решения человека по
+  `needs_human`, `dev` мог уйти вперёд уже ПОСЛЕ старта, а resume переиспользует
+  тот же worktree как есть. Настоящий rebase с обработкой конфликтов на уже
+  закоммиченной/незакоммиченной работе — отдельная, более сложная задача.
 - **Дашборд — только localhost**, доступ с телефона требует туннель
   (ngrok/cloudflared), не настроено.
 

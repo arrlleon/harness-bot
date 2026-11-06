@@ -11,7 +11,7 @@ import type {
 import { runClaudeTurn } from "./claudeEngine.js";
 import { establishBaselines, runGates } from "./verify.js";
 import { buildFeedbackPrompt, buildInitialPrompt } from "./prompts.js";
-import { createWorktree, commitAll } from "./git.js";
+import { createWorktree, commitAll, fetchFreshBase } from "./git.js";
 import { writeAcceptanceTest } from "./acceptanceTest.js";
 import { readMemoryFiles, buildMemoryContextBlock, updateProjectMemory } from "./memory.js";
 import { fingerprintFailure } from "./stuckDetector.js";
@@ -30,7 +30,16 @@ export function totalContextTokens(usage: ClaudeTurnUsage): number {
 }
 
 export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promise<CloseLoopResult> {
-  const worktreeDir = config.existingWorktreeDir ?? (await createWorktree(config.repoPath, config.branchName));
+  // Only applies to a genuinely new worktree — existingWorktreeDir means resuming one
+  // that may already have in-progress or committed work on it, where fetching and
+  // moving the branch point is a rebase-with-conflicts problem, not a simple fetch.
+  const worktreeDir =
+    config.existingWorktreeDir ??
+    (await createWorktree(
+      config.repoPath,
+      config.branchName,
+      config.freshBase ? await fetchFreshBase(config.repoPath, config.freshBase.baseBranch) : undefined,
+    ));
 
   let totalCostUsd: number;
   let gates: GateSpec[];

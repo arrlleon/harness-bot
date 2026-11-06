@@ -547,6 +547,7 @@ async function closeLoopAndPush(
       ? { model: config.models.testing, baseBranch: config.gitlab.targetBranch }
       : undefined,
     gateIntegrityCheck: config.gateIntegrityCheckEnabled ? { baseBranch: config.gitlab.targetBranch } : undefined,
+    freshBase: config.freshBaseEnabled ? { baseBranch: config.gitlab.targetBranch } : undefined,
     briefsEnabled: config.briefsEnabled,
     resumeFrom,
     onIteration: ({ iteration, phase, costUsd, summary }) => {
