@@ -376,8 +376,9 @@ npm install
 cp .env.example .env   # заполнить реальными токенами — файл НЕ коммитить, он в .gitignore
 
 npm run build
-node dist/cli.js bot          # прод-режим: Telegram-бот + дашборд
-node dist/cli.js queue        # один разовый прогон очереди (для cron/watch)
+node dist/cli.js bot          # прод-режим: Telegram-бот + дашборд, сам поллит Jira (ACTIVE/IDLE_POLL_SECONDS)
+node dist/cli.js queue        # один разовый пропозл тикета (только предлагает, не запускает) — для ручной отладки,
+                               # НЕ для cron: `bot` сам поллит, пока запущен (см. §7)
 node dist/cli.js dashboard    # только веб-дашборд, без Telegram
 node dist/cli.js eval         # прогнать мини eval-набор
 node dist/cli.js run --repo <path> --task '...' --verify "pnpm test"  # разовая задача вне Jira

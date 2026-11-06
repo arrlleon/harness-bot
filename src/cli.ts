@@ -78,10 +78,20 @@ program
 
 program
   .command("queue")
-  .description("Pick one assigned To Do ticket from Jira and run the close loop on it")
+  .description(
+    "Propose (not run) the next assigned ticket from Jira — requires a running `bot` (or the dashboard) " +
+      "to actually approve it; no longer a safe thing to put on cron by itself. Prefer leaving `bot` running " +
+      "continuously, which polls on its own — see HANDOFF.md.",
+  )
   .action(async () => {
-    const outcome = await runQueueOnce();
-    console.log(`[queue] ${JSON.stringify(outcome)}`);
+    try {
+      const outcome = await runQueueOnce();
+      console.log(`[queue] ${JSON.stringify(outcome)}`);
+      process.exit(0);
+    } catch (err) {
+      console.error(`[queue] failed: ${(err as Error).message}`);
+      process.exit(1);
+    }
   });
 
 program

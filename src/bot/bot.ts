@@ -21,6 +21,7 @@ import {
   confirmPending,
   cancelPending,
   listMenuCandidates,
+  proposeNext,
   proposeIssueByKey,
   getPendingHumanReviewDiff,
   resolveHumanReview,
@@ -227,23 +228,77 @@ export async function startBot(): Promise<void> {
   saveState(state);
   setBotRunning(false);
 
-  startDashboardServer(config.dashboard.port, state);
+  const announceChatId = config.telegram.allowedChatIds[0];
+  const announce: Sender = (text, keyboard) => bot.api.sendMessage(announceChatId, text, keyboard ? { reply_markup: keyboard } : undefined);
+
+  // Shared by the startup restore below and the auto-poll loop further down — a found
+  // proposal is announced the same way (same buttons, same MarkdownV2 formatting)
+  // whichever path found it.
+  async function announceProposal(p: Proposal, prefix = ""): Promise<void> {
+    const keyboard = new InlineKeyboard().text("✅ Подтвердить", `confirm:${p.issueKey}`).text("❌ Отменить", `cancel:${p.issueKey}`);
+    // formatProposal's output is MarkdownV2 (the expandable blockquote) — unlike the
+    // plain-text `announce` used for needs_human, this one needs parse_mode set.
+    await bot.api
+      .sendMessage(announceChatId, prefix + formatProposal(p), { reply_markup: keyboard, parse_mode: "MarkdownV2" })
+      .catch((err) => console.error("[bot] failed to announce proposal:", (err as Error).message));
+  }
+
+  // The in-process replacement for cron `queue`: as long as state.running, this keeps
+  // calling proposeNext() itself on a timer — the exact same propose-not-dispatch path a
+  // manual /start pick goes through, just triggered by a clock instead of a button. Polls
+  // fast (activePollSeconds) right after skipping a ticket (more may be queued right
+  // behind it), backs off to idlePollSeconds once nothing's left to find or the single
+  // task slot is already occupied (an approval/review/brief with its own buttons) — no
+  // point hammering Jira while blocked on a human decision. Reproduced live as the gap
+  // this whole fix closes: `queue` on cron (and the dashboard's old "start" button) used
+  // to skip straight to dispatchIssue() with no human ever seeing a plan first — see
+  // queue.ts's runQueueOnce/dispatchIssue comments.
+  let pollTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function clearPoll(): void {
+    if (pollTimer) {
+      clearTimeout(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  function schedulePoll(delaySeconds: number): void {
+    clearPoll();
+    if (!state.running) return;
+    pollTimer = setTimeout(() => void pollOnce(), delaySeconds * 1000);
+  }
+
+  async function pollOnce(): Promise<void> {
+    if (!state.running) return;
+    try {
+      const outcome = await proposeNext();
+      switch (outcome.kind) {
+        case "proposed":
+          await announceProposal(outcome.proposal);
+          schedulePoll(config.telegram.idlePollSeconds);
+          break;
+        case "skipped":
+          schedulePoll(config.telegram.activePollSeconds);
+          break;
+        default:
+          // empty / busy / awaiting_approval / paused — nothing more to do right now.
+          schedulePoll(config.telegram.idlePollSeconds);
+      }
+    } catch (err) {
+      console.error("[bot] auto-poll failed:", (err as Error).message);
+      schedulePoll(config.telegram.idlePollSeconds);
+    }
+  }
+
+  startDashboardServer(config.dashboard.port, (p) => void announceProposal(p));
 
   // A restart loses nothing mid-decision: a pending proposal or needs_human review has
   // no running process behind it (that already finished) — only the bot's own memory of
   // it, which loadPersistedPending() just restored from disk. Re-announce it so it isn't
   // silently sitting there until someone happens to check /status.
   const restored = loadPersistedPending();
-  const announceChatId = config.telegram.allowedChatIds[0];
-  const announce: Sender = (text, keyboard) => bot.api.sendMessage(announceChatId, text, keyboard ? { reply_markup: keyboard } : undefined);
   if (restored.pendingApproval) {
-    const p = restored.pendingApproval;
-    const keyboard = new InlineKeyboard().text("✅ Подтвердить", `confirm:${p.issueKey}`).text("❌ Отменить", `cancel:${p.issueKey}`);
-    // formatProposal's output is MarkdownV2 (the expandable blockquote) — unlike the
-    // plain-text `announce` used below for needs_human, this one needs parse_mode set.
-    bot.api
-      .sendMessage(announceChatId, "🔄 Восстановлено после перезапуска:\n\n" + formatProposal(p), { reply_markup: keyboard, parse_mode: "MarkdownV2" })
-      .catch(() => {});
+    void announceProposal(restored.pendingApproval, "🔄 Восстановлено после перезапуска:\n\n");
   }
   if (restored.pendingHumanReview) {
     const p = restored.pendingHumanReview;
@@ -289,9 +344,22 @@ export async function startBot(): Promise<void> {
   // specific one. Nothing is proposed or executed without that explicit pick.
   // Also reused as the auto-follow-up after a task closes (see confirm/accept_human/
   // reject_human below) so the queue keeps moving without a manual /start each time.
-  async function sendTicketMenu(ctx: Context, intro = "Выбери задачу, которую взять в работу:"): Promise<void> {
-    state.running = true;
-    saveState(state);
+  //
+  // `resume: true` means an explicit user action (/start, or "show me the list" free
+  // text) — always (re)enables state.running, same as before. Omitted means this is an
+  // AUTO follow-up after a task just finished: only show the menu (and keep the auto-
+  // poll loop going, since it reads state.running too) if the user hasn't pressed
+  // /stop while that task was running — otherwise /stop would be silently undone the
+  // moment the in-flight task happened to finish. Reproduced live: before this, /stop
+  // mid-task had no lasting effect at all once that task closed.
+  async function sendTicketMenu(ctx: Context, intro = "Выбери задачу, которую взять в работу:", opts: { resume?: boolean } = {}): Promise<void> {
+    if (opts.resume) {
+      state.running = true;
+      saveState(state);
+      schedulePoll(config.telegram.activePollSeconds);
+    } else if (!state.running) {
+      return;
+    }
     try {
       const candidates = await listMenuCandidates();
       if (candidates.length === 0) {
@@ -308,7 +376,7 @@ export async function startBot(): Promise<void> {
     }
   }
 
-  bot.command("start", (ctx) => sendTicketMenu(ctx));
+  bot.command("start", (ctx) => sendTicketMenu(ctx, undefined, { resume: true }));
 
   bot.callbackQuery(/^pick:(.+)$/, async (ctx) => {
     const key = ctx.match[1];
@@ -379,6 +447,7 @@ export async function startBot(): Promise<void> {
   async function handleStop(ctx: Context): Promise<void> {
     state.running = false;
     saveState(state);
+    clearPoll();
     await ctx.reply("🛑 Понял. Кнопки в уже показанных списках задач больше не сработают — напиши /start заново, когда понадобится.");
   }
   bot.command("stop", handleStop);
@@ -386,6 +455,7 @@ export async function startBot(): Promise<void> {
   async function handleKill(ctx: Context): Promise<void> {
     state.running = false;
     saveState(state);
+    clearPoll();
     const killed = killCurrentTurn();
     await ctx.reply(killed ? "⛔ Прервал текущий ход. Поиск новых тикетов тоже останавливаю." : "🤷 Сейчас ничего не делаю. Останавливаю поиск новых тикетов.");
   }
@@ -733,7 +803,7 @@ export async function startBot(): Promise<void> {
           break;
         case "list":
           await clear();
-          await sendTicketMenu(ctx);
+          await sendTicketMenu(ctx, undefined, { resume: true });
           break;
         case "peek":
           await clear();

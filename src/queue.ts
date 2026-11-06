@@ -286,11 +286,22 @@ async function proposeIssue(
   };
 }
 
+// Shared by proposeNext/proposeIssueByKey/dispatchIssue — a task shouldn't start while
+// ANY of the three pending states (approval, human-review, brief) is unresolved, not
+// just while something is actively executing (currentJob). Reproduced live as a real
+// gap: pendingBrief specifically was never checked anywhere, so starting a second
+// ticket while a brief sat paused on the first one was one click away — worse once
+// proposeNext runs on its own poll timer instead of only a manual /start click.
+function hasUnresolvedWork(): boolean {
+  const live = getLiveState();
+  return Boolean(live.currentJob || live.pendingApproval || live.pendingHumanReview || live.pendingBrief);
+}
+
 export async function proposeNext(onAnalyzing?: (issueKey: string) => void | Promise<void>): Promise<ProposeOutcome> {
   const paused = checkDailyCaps();
   if (paused) return paused;
   if (getLiveState().pendingApproval) return { kind: "awaiting_approval" };
-  if (getLiveState().currentJob) return { kind: "busy" };
+  if (hasUnresolvedWork()) return { kind: "busy" };
 
   const jira = new JiraClient(config.jira.baseUrl, config.jira.token);
   const issues = await jira.searchIssues(QUEUE_JQL());
@@ -309,7 +320,7 @@ export async function proposeIssueByKey(
   const paused = checkDailyCaps();
   if (paused) return paused;
   if (getLiveState().pendingApproval) return { kind: "awaiting_approval" };
-  if (getLiveState().currentJob) return { kind: "busy" };
+  if (hasUnresolvedWork()) return { kind: "busy" };
 
   const jira = new JiraClient(config.jira.baseUrl, config.jira.token);
   const issue = await jira.getIssue(issueKey);
@@ -367,17 +378,22 @@ function checkDailyCaps(): { kind: "paused"; reason: string } | null {
   return null;
 }
 
-// Shared by the auto-picked (runQueueOnce), manually-picked (runTicketByKey, from a
-// dashboard click), and proposed-and-approved (confirmPending) paths — all route,
-// budget-check, and dispatch the same way; they only differ in how the issue was
-// selected and whether a human-approved contract already exists for it.
-//
-// acceptanceCriteria defaults to [] for the two paths that skip propose/approve
-// entirely (no human has reviewed a contract for them) — confirmPending is the only
-// caller that ever passes a non-empty list, and it's frozen at that point: nothing
-// after this regenerates or edits it, the close loop only ever reads it for context.
-async function dispatchIssue(jira: JiraClient, issue: JiraIssue, acceptanceCriteria: string[] = []): Promise<QueueRunOutcome> {
-  if (getLiveState().currentJob) {
+// The ONLY path that actually starts real work — reached exclusively from
+// confirmPending(), after a human has approved a proposal (pendingApproval) that
+// already went through proposeIssue()'s analysis turn. runQueueOnce/proposeIssueByKey/
+// the dashboard's "start" all propose now, never dispatch directly (see each of their
+// own comments for why that used to be a real gap). acceptanceCriteria is always
+// confirmPending's own pending.acceptanceCriteria here — frozen at propose time,
+// nothing after this regenerates or edits it, the close loop only ever reads it for
+// context.
+async function dispatchIssue(jira: JiraClient, issue: JiraIssue, acceptanceCriteria: string[]): Promise<QueueRunOutcome> {
+  // Final gate right before real work starts, not just currentJob — a pendingBrief/
+  // pendingHumanReview with no currentJob behind it (the close loop already returned,
+  // finishJob() already ran) would otherwise let a second task start while the first
+  // one's still waiting on a human. Every caller (confirmPending, resolveBrief's
+  // continuations) already checked this earlier in its own flow, but this is the one
+  // chokepoint every path funnels through before touching a worktree.
+  if (hasUnresolvedWork()) {
     return { kind: "busy", issueKey: issue.key };
   }
 
@@ -447,32 +463,18 @@ async function dispatchIssue(jira: JiraClient, issue: JiraIssue, acceptanceCrite
   }
 }
 
-export async function runQueueOnce(): Promise<QueueRunOutcome> {
-  // Checked before touching Jira at all: a cap that only kicked in after
-  // transitioning a ticket would leave it stranded "In Progress" for no reason.
-  const paused = checkDailyCaps();
-  if (paused) return paused;
-
-  const jira = new JiraClient(config.jira.baseUrl, config.jira.token);
-  // statusCategory (not a literal status name) survives workflow renames/per-project
-  // status schemes; `status = "<name>"` rejected a status that genuinely appears on
-  // issues in this project, apparently stale/scheme-specific — statusCategory held up.
-  const issues = await jira.searchIssues(QUEUE_JQL());
-  if (issues.length === 0) return { kind: "empty" };
-
-  return dispatchIssue(jira, issues[0]);
-}
-
-// Manual dispatch from a dashboard click: same budget/routing/concurrency rules
-// as the auto-picked path, just skipping straight to a specific ticket instead
-// of taking whatever's top of the JQL order.
-export async function runTicketByKey(issueKey: string): Promise<QueueRunOutcome> {
-  const paused = checkDailyCaps();
-  if (paused) return paused;
-
-  const jira = new JiraClient(config.jira.baseUrl, config.jira.token);
-  const issue = await jira.getIssue(issueKey);
-  return dispatchIssue(jira, issue);
+// Reproduced live as a real gap: this used to search Jira and call dispatchIssue()
+// directly — the entire close loop (implement, review, push, open MR) with no propose
+// step and no human ever seeing a plan or cost estimate first. Exactly the gap the
+// Telegram pick:/confirm: flow exists to close, just bypassed entirely by running this
+// on a cron schedule the way HANDOFF.md itself used to recommend. Now a single
+// `queue` invocation only ever proposes (same as proposeNext/a Telegram pick) and
+// persists pendingApproval — still needs an actual human approval (via a running bot,
+// or the dashboard) before anything real happens. See HANDOFF.md §7/§9 for the fuller
+// reasoning and why "bot running continuously, with its own poll loop" replaced "queue
+// on cron" as the recommended way to keep the queue moving.
+export async function runQueueOnce(): Promise<ProposeOutcome> {
+  return proposeNext();
 }
 
 type RepoHandle = { path: string; gates: GateSpec[]; gitlabProjectPath: string; acceptanceRunner: string; acceptanceTestExt: string };

@@ -93,7 +93,7 @@ export const DASHBOARD_PAGE = `<!doctype html>
 <script>
 var TAB_HINTS = {
   task: "Что сейчас делает агент и прогресс по текущей задаче",
-  queue: "Тикеты из Jira, ожидающие запуска — выбери и нажми «Запустить»",
+  queue: "Тикеты из Jira — выбери и нажми «Предложить», подтверждение — в Telegram",
   history: "Последние завершённые задачи и их результат",
 };
 document.querySelectorAll(".tab-btn").forEach(function (btn) {
@@ -189,22 +189,22 @@ async function tick() {
 
 async function startTicket(key, btn) {
   btn.disabled = true;
-  btn.textContent = "запускается…";
+  btn.textContent = "анализирую…";
   try {
     const res = await fetch("/api/tickets/" + key + "/start", { method: "POST" });
     if (!res.ok) {
       const body = await res.json().catch(function () { return {}; });
-      alert("Не удалось запустить " + key + ": " + (body.error || res.status));
+      alert("Не удалось предложить " + key + ": " + (body.error || res.status));
       btn.disabled = false;
-      btn.textContent = "Запустить";
+      btn.textContent = "Предложить";
     } else {
-      btn.textContent = "запущено";
+      btn.textContent = "жди подтверждения в Telegram";
       setTimeout(loadTickets, 1500);
     }
   } catch (e) {
     alert("Ошибка: " + e.message);
     btn.disabled = false;
-    btn.textContent = "Запустить";
+    btn.textContent = "Предложить";
   }
 }
 
@@ -225,7 +225,7 @@ async function loadTickets() {
           '<div class="ticket-title"><b>' + t.key + '</b>: ' + t.summary.replace(/</g, "&lt;") + '<span class="repo-tag' + tagClass + '">' + (REPO_RU[t.repo] || t.repo) + '</span></div>' +
           '<div class="ticket-desc">' + t.description.slice(0, 220).replace(/</g, "&lt;") + '</div>' +
         '</div>' +
-        '<button class="start-btn" onclick="startTicket(\\'' + t.key + '\\', this)"' + (routable ? '' : ' disabled title="не удаётся определить репозиторий автоматически"') + '>Запустить</button>' +
+        '<button class="start-btn" onclick="startTicket(\\'' + t.key + '\\', this)"' + (routable ? '' : ' disabled title="не удаётся определить репозиторий автоматически"') + '>Предложить</button>' +
       '</div>';
     }).join("");
   } catch (e) {

@@ -1,7 +1,7 @@
 import { createServer, type Server } from "node:http";
 import { getLiveState } from "../bot/liveState.js";
-import { loadState, totalCostUsd, costSince, startOfTodayIso, recordOutcome, type BotState } from "../bot/state.js";
-import { listCandidates, runTicketByKey } from "../queue.js";
+import { loadState, totalCostUsd, costSince, startOfTodayIso } from "../bot/state.js";
+import { listCandidates, proposeIssueByKey, type Proposal } from "../queue.js";
 import { DASHBOARD_PAGE } from "./page.js";
 
 let server: Server | null = null;
@@ -13,14 +13,18 @@ function sendJson(res: import("node:http").ServerResponse, status: number, body:
   res.end(JSON.stringify(body));
 }
 
-// `sharedState`: when the dashboard runs embedded in the bot process, writes
-// from a manual dashboard-started ticket must land on the SAME BotState object
-// the bot's own /status and poll loop hold in memory — loading a fresh copy
-// here and saving that instead would silently fork the two, and the bot's
-// in-memory view would miss anything started from the dashboard until restart.
-// The standalone `dashboard` CLI command has no bot state to share, so it falls
-// back to a fresh load-mutate-save per write.
-export function startDashboardServer(port: number, sharedState?: BotState): void {
+// Reproduced live as a real gap (not just here — the same direct-dispatch pattern
+// existed for the cron `queue` command too): the dashboard's "start" button used to
+// call runTicketByKey, which ran the ENTIRE close loop — implement, review, push, open
+// MR — with no propose step and no human ever seeing a plan or cost estimate first.
+// Clicking "start" here now proposes exactly like Telegram's `pick:`, and `onProposal`
+// (when the dashboard runs embedded in the bot process) announces it there with the
+// same ✅/❌ buttons — the dashboard is a viewer + a way to kick off a proposal, not a
+// second, ungated way to actually run a task. The standalone `dashboard` CLI command
+// has no bot to announce through, so it omits the callback: a click there still
+// proposes (and anyone watching Jira sees the pendingApproval take effect on /status
+// once a bot is started), it just has nowhere to push a live notification.
+export function startDashboardServer(port: number, onProposal?: (proposal: Proposal) => void): void {
   if (server) return;
   server = createServer((req, res) => {
     if (req.url === "/api/state") {
@@ -53,15 +57,17 @@ export function startDashboardServer(port: number, sharedState?: BotState): void
     const startMatch = req.url?.match(/^\/api\/tickets\/([A-Za-z][A-Za-z0-9]*-\d+)\/start$/);
     if (startMatch && req.method === "POST") {
       const issueKey = startMatch[1];
-      if (getLiveState().currentJob) {
-        sendJson(res, 409, { error: "already busy with another ticket" });
+      const live = getLiveState();
+      if (live.currentJob || live.pendingApproval || live.pendingHumanReview || live.pendingBrief) {
+        sendJson(res, 409, { error: "already busy, or something else is waiting on a decision" });
         return;
       }
-      ticketsCache = null; // the ticket about to run will leave "To Do" shortly
       sendJson(res, 202, { ok: true, issueKey });
-      runTicketByKey(issueKey)
-        .then((outcome) => recordOutcome(sharedState ?? loadState(), outcome))
-        .catch((err: Error) => console.error(`[dashboard] manual run of ${issueKey} failed:`, err.message));
+      proposeIssueByKey(issueKey)
+        .then((outcome) => {
+          if (outcome.kind === "proposed") onProposal?.(outcome.proposal);
+        })
+        .catch((err: Error) => console.error(`[dashboard] propose for ${issueKey} failed:`, err.message));
       return;
     }
 
