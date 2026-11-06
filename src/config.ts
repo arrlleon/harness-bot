@@ -162,3 +162,15 @@ export const config = {
 };
 
 export type RepoKind = keyof typeof config.repos;
+
+// Name -> live value for exactly the secrets in SECRET_ENV_VARS, read from the same
+// `config` object every other consumer uses rather than process.env again — used to
+// scrub a role's returned text (claudeEngine.ts's runClaudeTurn) before it's ever
+// written to a memory file, Jira comment, or MR description. See secretScrub.ts.
+export function secretValues(): Record<string, string> {
+  return {
+    JIRA_PAT: config.jira.token,
+    GITLAB_TOKEN: config.gitlab.token,
+    TELEGRAM_BOT_TOKEN: config.telegram.botToken,
+  };
+}

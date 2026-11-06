@@ -2,7 +2,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import type { ClaudeTurnResult } from "../types.js";
 import { buildDisallowedTools } from "./guardrails.js";
-import { SECRET_ENV_VARS } from "../config.js";
+import { SECRET_ENV_VARS, secretValues } from "../config.js";
+import { scrubSecrets } from "./secretScrub.js";
 
 // Denylist, not allowlist: the `claude` CLI's own auth/config env surface (PATH, HOME,
 // proxy settings, NODE_OPTIONS, whatever it reads for login state) isn't fully known
@@ -153,7 +154,11 @@ export async function runClaudeTurn(opts: RunClaudeTurnOptions): Promise<ClaudeT
   const usage = (raw.usage as Record<string, unknown>) ?? {};
   return {
     sessionId: String(raw.session_id ?? ""),
-    resultText: String(raw.result ?? ""),
+    // Scrubbed here, once, for every role — implement/acceptance's resultText is just
+    // a status message (the real output is file edits, already outside this string),
+    // while propose/review/memory/testing-notes/brief feed this straight into a Jira
+    // comment, an MR description, or a committed memory file.
+    resultText: scrubSecrets(String(raw.result ?? ""), secretValues()),
     isError: Boolean(raw.is_error),
     terminalReason: String(raw.terminal_reason ?? "unknown"),
     totalCostUsd: Number(raw.total_cost_usd ?? 0),

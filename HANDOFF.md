@@ -143,6 +143,7 @@ src/
     testingNotes.ts    — инструкция для тестировщика
     verify.ts          — baseline-сравнение гейтов (typecheck/lint/test/build)
     gateIntegrity.ts   — механическая проверка "не ослабил ли агент гейты"
+    secretScrub.ts     — чистые функции скраба секретов из resultText read-only ролей
     stuckDetector.ts   — fingerprintFailure() для детектора застревания
     guardrails.ts      — DEFAULT_DENIED_PATHS (миграции/.env/CI/lock-файлы/ключи)
     checkpoint.ts      — механический checkpoint на диске, recoverOrphanedCheckpoints()
@@ -250,7 +251,11 @@ worktree add/remove`) рядом с основным чекаутом репоз
   `SECRET_ENV_VARS` в `config.ts` + `buildAgentEnv()` в `claudeEngine.ts`.
   Если добавляешь новый секрет в `.env` — ОБЯЗАТЕЛЬНО добавь его в этот
   список, иначе он утечёт в окружение `claude` и будет читаем через Bash
-  (если Bash когда-нибудь разрешат какой-то роли).
+  (если Bash когда-нибудь разрешат какой-то роли). Добавь его туда же и в
+  `secretValues()` рядом с `SECRET_ENV_VARS` в `config.ts` — это вторая,
+  отдельная защита (`secretScrub.ts` + `runClaudeTurn`), которая маскирует
+  значение секрета, если read-only роль случайно прочитает его из файла/лога
+  и скопирует в свой текстовый ответ (идёт в Jira/MR/память проекта).
 - **Checkpoint живёт дольше, чем кажется** — не только на время итераций
   implement, но и через push/MR/комментарий в Jira (см. README "Checkpoint").
   Если добавляешь новый шаг после успеха (ещё один комментарий, ещё один
