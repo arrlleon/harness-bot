@@ -37,7 +37,37 @@ export interface CloseLoopResumeState {
   extraDeniedPaths?: string[];
   acceptanceTestPath?: string;
   previousFingerprint?: string;
+  // Present only when resuming a brief raised during the review<->fix loop, not the
+  // main implement loop above (iteration/previousFingerprint are meaningless there and
+  // go unused on this path). `round` is which review round raised it; `blocking` is
+  // that round's own findings, needed to reconstruct the exact failure message if the
+  // resumed fix turn goes on to break a gate — reviewChanges isn't re-run before this,
+  // since the diff hasn't changed since the brief was raised.
+  reviewResume?: { round: number; blocking: ReviewFinding[] };
 }
+
+// Present only on a brief raised during a cross-repo task's backend or frontend half —
+// lets resolveBrief (queue.ts) continue the same autonomous backend->frontend handoff
+// a first attempt would have, instead of falling back to the needs_human text path.
+export type CrossRepoBriefContext =
+  | {
+      stage: "backend";
+      // The frontend half to run once this brief resolves and backend succeeds — the
+      // exact task/branch runCrossRepoJob itself would have used.
+      frontendTask: TaskSpec;
+      frontendBranchName: string;
+      frontendGitlabProjectPath: string;
+    }
+  | {
+      stage: "frontend";
+      // Backend's own worktree is already cleaned up and its CloseLoopResult is gone
+      // by the time a frontend-stage brief pauses — these are the only pieces of it
+      // the final combined "closed both halves" comment and cost/review totals still need.
+      backendMrUrl: string;
+      backendCostUsd: number;
+      backendTestingNotes?: string;
+      backendReviewRounds?: number;
+    };
 
 // Every turn is one of these — used both for per-role project memory
 // (.claude/memory/jira-harness/<role>.md) and per-task scratch

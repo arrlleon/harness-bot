@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseBrief, buildBriefAnswerPrompt, buildBriefInstructions, formatBriefAsText } from "./brief.js";
+import { parseBrief, buildBriefAnswerPrompt, buildBriefInstructions } from "./brief.js";
 import type { Brief } from "../types.js";
 
 test("parseBrief extracts question, options, recommendation, and rationale from a well-formed brief", () => {
@@ -74,21 +74,6 @@ test("buildBriefAnswerPrompt names the question and the chosen option", () => {
   assert.match(prompt, /Как считать объём\?/);
   assert.match(prompt, /Свой вариант/);
   assert.doesNotMatch(prompt, /Сумма ставок/);
-});
-
-test("formatBriefAsText flattens the question, options, and recommendation into one line", () => {
-  const brief: Brief = {
-    question: "Как считать объём?",
-    options: [{ label: "Сумма ставок" }, { label: "Свой вариант" }],
-    recommendedIndex: 0,
-    rationale: "Совпадает с ручным отчётом",
-  };
-  const text = formatBriefAsText(brief);
-  assert.match(text, /Как считать объём\?/);
-  assert.match(text, /1\. Сумма ставок ★/);
-  assert.match(text, /2\. Свой вариант/);
-  assert.doesNotMatch(text, /2\. Свой вариант ★/);
-  assert.match(text, /Совпадает с ручным отчётом/);
 });
 
 test("buildBriefInstructions documents the exact format parseBrief expects", () => {

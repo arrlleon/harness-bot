@@ -70,17 +70,6 @@ export function parseBrief(text: string): Brief | null {
   };
 }
 
-// Flattens a brief into one line of plain text — for contexts with no buttons (Jira
-// comments, the cross-repo needs_human fallback in queue.ts) where the question still
-// needs to be legible, just without the one-click affordance Telegram gives it.
-export function formatBriefAsText(brief: Brief): string {
-  const options = brief.options
-    .map((o, i) => `${i + 1}. ${o.label}${brief.recommendedIndex === i ? " ★" : ""}`)
-    .join("; ");
-  const rationale = brief.rationale ? ` (${brief.rationale})` : "";
-  return `${brief.question} Варианты: ${options}${rationale}`;
-}
-
 // What the paused session sees once the human picks an option — resumed via the same
 // sessionId (CloseLoopResumeState), so this only needs to hand over the answer, not
 // re-explain the whole task.

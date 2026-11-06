@@ -2,7 +2,7 @@ import { config } from "./config.js";
 import { JiraClient, type JiraIssue } from "./jira/client.js";
 import { detectRepo, toTaskSpec, type RepoDetection } from "./jira/mapToTask.js";
 import { runCloseLoop } from "./engine/loop.js";
-import { formatBriefAsText, buildBriefAnswerPrompt } from "./engine/brief.js";
+import { buildBriefAnswerPrompt } from "./engine/brief.js";
 import { runClaudeTurn } from "./engine/claudeEngine.js";
 import { parseProposalResponse } from "./engine/proposal.js";
 import { readMemoryFiles, buildMemoryContextBlock } from "./engine/memory.js";
@@ -722,8 +722,11 @@ function testingNotesSection(notes: string | undefined): string {
 // Cross-repo: backend and frontend each run their own independent review, under the
 // same REVIEW_ENABLED config — so reviewRounds is either present on both or absent on
 // both, never a meaningful mix. undefined only when review never ran for either half.
-function sumReviewRounds(...results: Array<{ reviewRounds?: number }>): number | undefined {
-  const defined = results.map((r) => r.reviewRounds).filter((n): n is number => n !== undefined);
+// Takes raw values rather than results objects so a resumed cross-repo brief (where
+// backend's own CloseLoopResult no longer exists, only its carried-over reviewRounds
+// number) can use it exactly the same way a first attempt does.
+function sumReviewRounds(...values: Array<number | undefined>): number | undefined {
+  const defined = values.filter((n): n is number => n !== undefined);
   return defined.length > 0 ? defined.reduce((a, b) => a + b, 0) : undefined;
 }
 
@@ -758,36 +761,48 @@ async function runCrossRepoJob(
   await jira.transitionTo(issue.key, config.jira.inProgressStatus);
 
   const backendOutcome = await closeLoopAndPush(issue, backend.repo, backend.task, backend.branchName);
+  return afterBackendAttempt(jira, issue, backend, frontend, backendOutcome);
+}
+
+// Everything that happens once a backend attempt (a first try, or a resumed brief)
+// comes back: brief, failure, or success into the frontend half. Shared by
+// runCrossRepoJob's first attempt and resolveBrief's resumed one for a backend-stage
+// brief — same reasoning as handleCloseLoopOutcome for the single-repo path.
+async function afterBackendAttempt(
+  jira: JiraClient,
+  issue: { key: string; summary: string },
+  backend: { task: TaskSpec; repo: RepoHandle; branchName: string },
+  frontend: { task: TaskSpec; repo: RepoHandle; branchName: string },
+  backendOutcome: CloseLoopAndPushOutcome,
+): Promise<JobOutcome> {
   const backendResult = backendOutcome.closeLoopResult;
 
   if (backendOutcome.briefPending) {
-    // One-click brief resolution (setPendingBrief/resolveBrief) only knows how to
-    // resume a single-repo task — continuing a cross-repo task into its frontend half
-    // after the backend brief is answered needs its own resume path, not built yet.
-    // Falls back to the existing needs_human flow instead: safe (nothing is lost or
-    // silently misrouted), just not one-click — the question/options are spelled out
-    // as text, and a human decides via accept/reject like any other needs_human case.
-    const reason = `backend: ${formatBriefAsText(backendResult.brief!)}`;
-    await jira.addComment(issue.key, `jira-harness (cross-repo): вопрос от бэкенда — ${reason}`);
-    setPendingHumanReview({
+    // One-click, same shape as a single-repo brief: paused on the backend's own
+    // session, resolveBrief resumes it with the chosen answer and continues into the
+    // frontend half exactly as a first attempt would (see CrossRepoBriefContext).
+    await jira.addComment(
+      issue.key,
+      `jira-harness (cross-repo): вопрос от бэкенда — см. Telegram.\n«${backendResult.brief!.question}»`,
+    );
+    setPendingBrief({
       issueKey: issue.key,
       title: issue.summary,
-      reason,
-      costUsd: backendResult.totalCostUsd,
+      task: backend.task,
+      brief: backendResult.brief!,
       worktreeDir: backendResult.worktreeDir,
       branchName: backend.branchName,
       gitlabProjectPath: backend.repo.gitlabProjectPath,
+      resumeState: backendResult.resumeState!,
+      crossRepo: {
+        stage: "backend",
+        frontendTask: frontend.task,
+        frontendBranchName: frontend.branchName,
+        frontendGitlabProjectPath: frontend.repo.gitlabProjectPath,
+      },
     });
     clearCheckpoint(issue.key);
-    return {
-      kind: "needs_human",
-      issueKey: issue.key,
-      costUsd: backendResult.totalCostUsd,
-      reason,
-      worktreeDir: backendResult.worktreeDir,
-      branchName: backend.branchName,
-      reviewRounds: backendResult.reviewRounds,
-    };
+    return { kind: "brief_pending", issueKey: issue.key };
   }
 
   if (backendOutcome.failureKind) {
@@ -850,42 +865,63 @@ async function runCrossRepoJob(
   };
 
   const frontendOutcome = await closeLoopAndPush(issue, frontend.repo, frontendTask, frontend.branchName);
+  return afterFrontendAttempt(
+    jira,
+    issue,
+    { task: frontendTask, repo: frontend.repo, branchName: frontend.branchName },
+    { totalCostUsd: backendResult.totalCostUsd, testingNotes: backendResult.testingNotes, reviewRounds: backendResult.reviewRounds, mrUrl: backendOutcome.mrUrl! },
+    frontendOutcome,
+  );
+}
+
+// Mirror of afterBackendAttempt for the frontend half — shared by the normal handoff
+// above and resolveBrief's resumed attempt for a frontend-stage brief. `backendInfo` is
+// everything the final combined comment/cost/review totals still need from backend,
+// since by this point backend's own worktree is already gone, and on a resume its
+// CloseLoopResult never existed in this process at all — only what was carried over in
+// CrossRepoBriefContext.
+async function afterFrontendAttempt(
+  jira: JiraClient,
+  issue: { key: string; summary: string },
+  frontend: { task: TaskSpec; repo: RepoHandle; branchName: string },
+  backendInfo: { totalCostUsd: number; testingNotes?: string; reviewRounds?: number; mrUrl: string },
+  frontendOutcome: CloseLoopAndPushOutcome,
+): Promise<JobOutcome> {
   const frontendResult = frontendOutcome.closeLoopResult;
-  const totalCostUsd = backendResult.totalCostUsd + frontendResult.totalCostUsd;
+  const totalCostUsd = backendInfo.totalCostUsd + frontendResult.totalCostUsd;
 
   if (frontendOutcome.briefPending) {
-    // Same fallback as the backend branch above — one-click brief resolution isn't
-    // wired up for cross-repo tasks yet, so this routes through needs_human instead,
-    // with the question spelled out as text. Backend's MR already stands on its own.
-    const reason = `frontend: ${formatBriefAsText(frontendResult.brief!)} (backend already opened: ${backendOutcome.mrUrl})`;
-    await jira.addComment(issue.key, `jira-harness (cross-repo): backend done — ${backendOutcome.mrUrl}\nвопрос от фронтенда — ${reason}`);
-    setPendingHumanReview({
+    await jira.addComment(
+      issue.key,
+      `jira-harness (cross-repo): backend done — ${backendInfo.mrUrl}\nвопрос от фронтенда — см. Telegram.\n«${frontendResult.brief!.question}»`,
+    );
+    setPendingBrief({
       issueKey: issue.key,
       title: issue.summary,
-      reason,
-      costUsd: totalCostUsd,
+      task: frontend.task,
+      brief: frontendResult.brief!,
       worktreeDir: frontendResult.worktreeDir,
       branchName: frontend.branchName,
       gitlabProjectPath: frontend.repo.gitlabProjectPath,
+      resumeState: frontendResult.resumeState!,
+      crossRepo: {
+        stage: "frontend",
+        backendMrUrl: backendInfo.mrUrl,
+        backendCostUsd: backendInfo.totalCostUsd,
+        backendTestingNotes: backendInfo.testingNotes,
+        backendReviewRounds: backendInfo.reviewRounds,
+      },
     });
     clearCheckpoint(issue.key);
-    return {
-      kind: "needs_human",
-      issueKey: issue.key,
-      costUsd: totalCostUsd,
-      reason,
-      worktreeDir: frontendResult.worktreeDir,
-      branchName: frontend.branchName,
-      reviewRounds: sumReviewRounds(backendResult, frontendResult),
-    };
+    return { kind: "brief_pending", issueKey: issue.key };
   }
 
   if (frontendOutcome.failureKind) {
-    const reason = `frontend: ${frontendOutcome.failureReason} (backend already opened: ${backendOutcome.mrUrl})`;
+    const reason = `frontend: ${frontendOutcome.failureReason} (backend already opened: ${backendInfo.mrUrl})`;
     await jira.addComment(
       issue.key,
       [
-        `jira-harness (cross-repo): backend done — ${backendOutcome.mrUrl}`,
+        `jira-harness (cross-repo): backend done — ${backendInfo.mrUrl}`,
         `frontend half did not close — ${frontendOutcome.failureReason}`,
         `cost: $${totalCostUsd.toFixed(4)}`,
         `frontend worktree left at: ${frontendResult.worktreeDir}`,
@@ -909,12 +945,12 @@ async function runCrossRepoJob(
       reason,
       worktreeDir: frontendResult.worktreeDir,
       branchName: frontend.branchName,
-      reviewRounds: sumReviewRounds(backendResult, frontendResult),
+      reviewRounds: sumReviewRounds(backendInfo.reviewRounds, frontendResult.reviewRounds),
     };
   }
 
   const crossRepoNotes = [
-    backendResult.testingNotes ? `Бэкенд:\n${backendResult.testingNotes}` : "",
+    backendInfo.testingNotes ? `Бэкенд:\n${backendInfo.testingNotes}` : "",
     frontendResult.testingNotes ? `Фронтенд:\n${frontendResult.testingNotes}` : "",
   ]
     .filter(Boolean)
@@ -925,7 +961,7 @@ async function runCrossRepoJob(
     issue.key,
     [
       "jira-harness (cross-repo) closed both halves:",
-      `backend: ${backendOutcome.mrUrl}`,
+      `backend: ${backendInfo.mrUrl}`,
       `frontend: ${frontendOutcome.mrUrl}`,
       `cost: $${totalCostUsd.toFixed(4)}`,
     ].join("\n") + testingNotesSection(crossRepoNotes || undefined),
@@ -937,8 +973,8 @@ async function runCrossRepoJob(
     kind: "closed",
     issueKey: issue.key,
     costUsd: totalCostUsd,
-    mrUrl: `backend: ${backendOutcome.mrUrl}, frontend: ${frontendOutcome.mrUrl}`,
-    reviewRounds: sumReviewRounds(backendResult, frontendResult),
+    mrUrl: `backend: ${backendInfo.mrUrl}, frontend: ${frontendOutcome.mrUrl}`,
+    reviewRounds: sumReviewRounds(backendInfo.reviewRounds, frontendResult.reviewRounds),
   };
 }
 
@@ -1002,9 +1038,39 @@ export async function resolveBrief(chosenIndex: number): Promise<QueueRunOutcome
       ...pending.resumeState,
       prompt: answerPrompt,
     });
-    const jobOutcome = await handleCloseLoopOutcome(jira, issue, repo, pending.task, pending.branchName, outcome);
+
+    let jobOutcome: JobOutcome;
+    if (pending.crossRepo?.stage === "backend") {
+      const frontendRepo = repoConfigFor(pending.crossRepo.frontendGitlabProjectPath);
+      jobOutcome = await afterBackendAttempt(
+        jira,
+        issue,
+        { task: pending.task, repo, branchName: pending.branchName },
+        { task: pending.crossRepo.frontendTask, repo: frontendRepo, branchName: pending.crossRepo.frontendBranchName },
+        outcome,
+      );
+    } else if (pending.crossRepo?.stage === "frontend") {
+      jobOutcome = await afterFrontendAttempt(
+        jira,
+        issue,
+        { task: pending.task, repo, branchName: pending.branchName },
+        {
+          totalCostUsd: pending.crossRepo.backendCostUsd,
+          testingNotes: pending.crossRepo.backendTestingNotes,
+          reviewRounds: pending.crossRepo.backendReviewRounds,
+          mrUrl: pending.crossRepo.backendMrUrl,
+        },
+        outcome,
+      );
+    } else {
+      jobOutcome = await handleCloseLoopOutcome(jira, issue, repo, pending.task, pending.branchName, outcome);
+    }
+
     if (jobOutcome.kind === "closed" || jobOutcome.kind === "needs_human") {
-      return { ...jobOutcome, durationMs: Date.now() - startedAt, repo: pending.gitlabProjectPath };
+      // "cross" matches the repo tag a cross-repo task's own first attempt reports
+      // (dispatchIssue) — /metrics groups by this field, and a half's own gitlabProjectPath
+      // would misrepresent a cross-repo task as single-repo.
+      return { ...jobOutcome, durationMs: Date.now() - startedAt, repo: pending.crossRepo ? "cross" : pending.gitlabProjectPath };
     }
     return jobOutcome;
   } finally {

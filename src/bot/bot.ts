@@ -151,9 +151,10 @@ function formatProposal(p: Proposal): string {
 // Modeled on ETS Tender's own production "брифы": a structured question with concrete
 // options the human answers with one click, not free text the harness would have to
 // interpret. ★ marks the agent's own recommendation, same as their deck shows it.
-function formatBrief(issueKey: string, brief: Brief): string {
+function formatBrief(issueKey: string, brief: Brief, crossRepoStage?: "backend" | "frontend"): string {
+  const stageTag = crossRepoStage === "backend" ? " (бэкенд-часть)" : crossRepoStage === "frontend" ? " (фронтенд-часть)" : "";
   const lines = [
-    `❓ Вопрос по ${issueKey}:`,
+    `❓ Вопрос по ${issueKey}${stageTag}:`,
     brief.question,
     "",
     ...brief.options.map((o, i) => `${i + 1}. ${o.label}${brief.recommendedIndex === i ? " ★" : ""}`),
@@ -251,9 +252,10 @@ export async function startBot(): Promise<void> {
   }
   if (restored.pendingBrief) {
     const p = restored.pendingBrief;
-    announce("🔄 Восстановлено после перезапуска:\n\n" + formatBrief(p.issueKey, p.brief), briefKeyboard(p.issueKey, p.brief)).catch(
-      () => {},
-    );
+    announce(
+      "🔄 Восстановлено после перезапуска:\n\n" + formatBrief(p.issueKey, p.brief, p.crossRepo?.stage),
+      briefKeyboard(p.issueKey, p.brief),
+    ).catch(() => {});
   }
 
   // A checkpoint left on disk means the process died mid-iteration last run (not a
@@ -515,7 +517,10 @@ export async function startBot(): Promise<void> {
           // The task is paused, not finished — don't show the ticket menu below until
           // this is answered (resolveBrief itself re-announces the next step).
           const pending = getLiveState().pendingBrief;
-          if (pending) await ctx.reply(formatBrief(pending.issueKey, pending.brief), { reply_markup: briefKeyboard(pending.issueKey, pending.brief) });
+          if (pending)
+            await ctx.reply(formatBrief(pending.issueKey, pending.brief, pending.crossRepo?.stage), {
+              reply_markup: briefKeyboard(pending.issueKey, pending.brief),
+            });
           return;
         } else {
           const text = describeOutcome(outcome);
@@ -613,7 +618,10 @@ export async function startBot(): Promise<void> {
         } else if (outcome.kind === "brief_pending") {
           // Resumed, but the agent had ANOTHER question — same handling as the first.
           const next = getLiveState().pendingBrief;
-          if (next) await ctx.reply(formatBrief(next.issueKey, next.brief), { reply_markup: briefKeyboard(next.issueKey, next.brief) });
+          if (next)
+            await ctx.reply(formatBrief(next.issueKey, next.brief, next.crossRepo?.stage), {
+              reply_markup: briefKeyboard(next.issueKey, next.brief),
+            });
           return;
         } else {
           const text = describeOutcome(outcome);

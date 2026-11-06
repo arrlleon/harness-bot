@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CostEstimate } from "./state.js";
-import type { Brief, CloseLoopResumeState, TaskSpec } from "../types.js";
+import type { Brief, CloseLoopResumeState, CrossRepoBriefContext, TaskSpec } from "../types.js";
 
 // Overridable so tests (and checkpoint.ts, which shares this directory) can point at a
 // throwaway location instead of ever touching the real bot's persisted state on disk.
@@ -84,6 +84,9 @@ export interface PendingBrief {
   branchName: string;
   gitlabProjectPath: string;
   resumeState: CloseLoopResumeState;
+  // Absent for a single-repo task's brief. Present for one raised during either half
+  // of a cross-repo task — see CrossRepoBriefContext for what each stage carries.
+  crossRepo?: CrossRepoBriefContext;
 }
 
 export interface LiveState {
