@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { estimateCost, type BotState, type TaskRecord } from "./state.js";
+import { estimateCost, computeMetrics, type BotState, type TaskRecord } from "./state.js";
 
 function record(partial: Partial<TaskRecord> & { issueKey: string }): TaskRecord {
   return {
@@ -89,4 +89,72 @@ test("estimateCost with no repo argument uses the overall history directly", () 
   const estimate = estimateCost(state);
   assert.equal(estimate?.sampleSize, 2);
   assert.equal(estimate?.avgCostUsd, 5);
+});
+
+test("computeMetrics returns null when there's no closed/needs_human history yet", () => {
+  assert.equal(computeMetrics(stateWith([])), null);
+  assert.equal(computeMetrics(stateWith([record({ issueKey: "A", outcome: "skipped" })])), null);
+});
+
+test("computeMetrics counts closed vs needs_human and derives the escalation rate", () => {
+  const state = stateWith([
+    record({ issueKey: "A", outcome: "closed" }),
+    record({ issueKey: "B", outcome: "closed" }),
+    record({ issueKey: "C", outcome: "needs_human" }),
+    record({ issueKey: "D", outcome: "skipped" }), // excluded from every count below
+  ]);
+  const metrics = computeMetrics(state);
+  assert.equal(metrics?.totalTasks, 3);
+  assert.equal(metrics?.closedCount, 2);
+  assert.equal(metrics?.needsHumanCount, 1);
+  assert.equal(metrics?.escalationRate, 1 / 3);
+});
+
+test("computeMetrics computes average/median cost and duration across closed and needs_human", () => {
+  const state = stateWith([
+    record({ issueKey: "A", outcome: "closed", costUsd: 1, durationMs: 60_000 }),
+    record({ issueKey: "B", outcome: "needs_human", costUsd: 3, durationMs: 120_000 }),
+  ]);
+  const metrics = computeMetrics(state);
+  assert.equal(metrics?.avgCostUsd, 2);
+  assert.equal(metrics?.medianCostUsd, 2);
+  assert.equal(metrics?.avgDurationMs, 90_000);
+  assert.equal(metrics?.medianDurationMs, 90_000);
+});
+
+test("computeMetrics returns null durations when nothing in history has a recorded duration", () => {
+  const state = stateWith([record({ issueKey: "A", outcome: "closed", costUsd: 1 })]);
+  const metrics = computeMetrics(state);
+  assert.equal(metrics?.avgDurationMs, null);
+  assert.equal(metrics?.medianDurationMs, null);
+});
+
+test("computeMetrics averages reviewRounds over closed tasks only, excluding needs_human", () => {
+  const state = stateWith([
+    record({ issueKey: "A", outcome: "closed", reviewRounds: 1 }),
+    record({ issueKey: "B", outcome: "closed", reviewRounds: 3 }),
+    // A needs_human escalation's own round count shouldn't dilute "rounds on a closed task".
+    record({ issueKey: "C", outcome: "needs_human", reviewRounds: 3 }),
+  ]);
+  const metrics = computeMetrics(state);
+  assert.equal(metrics?.avgReviewRounds, 2);
+});
+
+test("computeMetrics returns null avgReviewRounds when review never ran for any closed task", () => {
+  const state = stateWith([record({ issueKey: "A", outcome: "closed" })]);
+  const metrics = computeMetrics(state);
+  assert.equal(metrics?.avgReviewRounds, null);
+});
+
+test("computeMetrics breaks totals down per repo, grouping anything unlabeled under 'unknown'", () => {
+  const state = stateWith([
+    record({ issueKey: "A", outcome: "closed", repo: "backend" }),
+    record({ issueKey: "B", outcome: "needs_human", repo: "backend" }),
+    record({ issueKey: "C", outcome: "closed", repo: "frontend" }),
+    record({ issueKey: "D", outcome: "closed" }), // no repo at all — pre-existing/ad-hoc record
+  ]);
+  const metrics = computeMetrics(state);
+  assert.deepEqual(metrics?.byRepo.backend, { total: 2, closed: 1, needsHuman: 1 });
+  assert.deepEqual(metrics?.byRepo.frontend, { total: 1, closed: 1, needsHuman: 0 });
+  assert.deepEqual(metrics?.byRepo.unknown, { total: 1, closed: 1, needsHuman: 0 });
 });

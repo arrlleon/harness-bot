@@ -186,6 +186,10 @@ export type QueueRunOutcome =
       branchName: string;
       durationMs: number;
       repo: string;
+      // Absent when review was disabled, or never got far enough to run for this
+      // outcome (e.g. the agent erred out before any commit). For a cross-repo task,
+      // the sum of whichever half(s) actually ran review by this point.
+      reviewRounds?: number;
     }
   // The agent genuinely isn't sure and raised a brief instead of guessing — distinct
   // from needs_human (which means something went wrong); this just means a decision
@@ -193,7 +197,7 @@ export type QueueRunOutcome =
   // needs_human/closed, this isn't a final outcome — the task is still open and will
   // resume once resolveBrief() runs.
   | { kind: "brief_pending"; issueKey: string }
-  | { kind: "closed"; issueKey: string; costUsd: number; mrUrl: string; durationMs: number; repo: string };
+  | { kind: "closed"; issueKey: string; costUsd: number; mrUrl: string; durationMs: number; repo: string; reviewRounds?: number };
 
 export interface CloseLoopResult {
   task: TaskSpec;

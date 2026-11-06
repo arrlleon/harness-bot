@@ -1,6 +1,17 @@
 import { Bot, InlineKeyboard, type Context } from "grammy";
 import { config } from "../config.js";
-import { loadState, saveState, recordTask, recordOutcome, totalCostUsd, costSince, countSince, startOfTodayIso, type BotState } from "./state.js";
+import {
+  loadState,
+  saveState,
+  recordTask,
+  recordOutcome,
+  totalCostUsd,
+  costSince,
+  countSince,
+  startOfTodayIso,
+  computeMetrics,
+  type BotState,
+} from "./state.js";
 import { setBotRunning, getLiveState, loadPersistedPending } from "./liveState.js";
 import { recoverOrphanedCheckpoints } from "../engine/checkpoint.js";
 import { startDashboardServer, dashboardUrl } from "../web/server.js";
@@ -40,6 +51,7 @@ const HELP_TEXT = [
   "/stop — деактивирую кнопки в уже показанных списках (то, что уже в работе или ждёт твоего решения, не трогаю)",
   "/kill — немедленно прерву текущий ход (если завис или делает не то)",
   "/status — расскажу, что сейчас происходит, расход, последний обработанный тикет",
+  "/metrics — исторический трек-рекорд: доля задач без эскалации, средние стоимость/время/раунды ревью",
   "/budget — расход/число задач за сегодня относительно дневных лимитов",
   "/peek — покажу следующий тикет в очереди, не запуская его",
   "/retry XEN-123 — верну тикет, застрявший в «нужен человек», обратно в очередь",
@@ -453,6 +465,35 @@ export async function startBot(): Promise<void> {
   }
   bot.command("status", handleStatus);
 
+  async function handleMetrics(ctx: Context): Promise<void> {
+    const metrics = computeMetrics(state);
+    if (!metrics) {
+      await ctx.reply("📊 Пока нет ни одной закрытой или эскалированной задачи — рано считать метрики.");
+      return;
+    }
+    const closedShare = Math.round((metrics.closedCount / metrics.totalTasks) * 100);
+    const lines = [
+      `📊 Метрики по ${metrics.totalTasks} задачам`,
+      `✅ без эскалации: ${closedShare}% (${metrics.closedCount}/${metrics.totalTasks})`,
+      `💰 стоимость: ~$${metrics.avgCostUsd.toFixed(4)} в среднем, $${metrics.medianCostUsd.toFixed(4)} медиана`,
+      metrics.avgDurationMs !== null
+        ? `⏱ тикет→MR: ~${Math.round(metrics.avgDurationMs / 60_000)} мин в среднем, ${Math.round(metrics.medianDurationMs! / 60_000)} мин медиана`
+        : "⏱ тикет→MR: нет данных (история только из старых записей без durationMs)",
+      metrics.avgReviewRounds !== null
+        ? `🔁 раунды ревью на закрытую задачу: ~${metrics.avgReviewRounds.toFixed(1)}`
+        : "🔁 раунды ревью: нет данных",
+    ];
+    const repoEntries = Object.entries(metrics.byRepo);
+    if (repoEntries.length > 1) {
+      lines.push("", "по репозиториям:");
+      for (const [repo, m] of repoEntries) {
+        lines.push(`  ${repo}: ${m.closed}/${m.total} без эскалации`);
+      }
+    }
+    await ctx.reply(lines.join("\n"));
+  }
+  bot.command("metrics", handleMetrics);
+
   bot.callbackQuery(/^confirm:(.+)$/, async (ctx) => {
     const key = ctx.match[1];
     const pending = getLiveState().pendingApproval;
@@ -589,7 +630,7 @@ export async function startBot(): Promise<void> {
   // the handler itself fetches the real data, so a chat answer about status/budget/etc.
   // can never be a hallucinated number — only "chat" replies are Claude's own words.
   interface ChatIntent {
-    intent: "status" | "budget" | "list" | "peek" | "kill" | "help" | "retry" | "chat";
+    intent: "status" | "metrics" | "budget" | "list" | "peek" | "kill" | "help" | "retry" | "chat";
     key?: string;
     reply?: string;
   }
@@ -626,6 +667,8 @@ export async function startBot(): Promise<void> {
       "одной из форм:",
       "",
       '{"intent":"status"} — что сейчас происходит, запущено ли, что последнее обработано',
+      '{"intent":"metrics"} — исторический трек-рекорд: доля задач без эскалации, средние',
+      "  стоимость/время/раунды ревью за всё время (не про бюджет на сегодня — это budget)",
       '{"intent":"budget"} — расход/бюджет/сколько потрачено/сколько задач за сегодня',
       '{"intent":"list"} — показать список задач / начать работу над чем-то / что взять в работу',
       '{"intent":"peek"} — глянуть следующую задачу в очереди, не запуская',
@@ -636,7 +679,7 @@ export async function startBot(): Promise<void> {
       "  команд выше (обычный разговор, вопрос не по теме, благодарность и т.п.). reply —",
       "  твой ответ ОТ СВОЕГО ЛИЦА: по-деловому, но по-человечески, коротко, на русском,",
       "  без канцелярита и без фраз вроде «я бот/ассистент». Не выдумывай цифры бота здесь —",
-      "  если нужны именно они, это всегда status/budget/list/peek, а не chat.",
+      "  если нужны именно они, это всегда status/metrics/budget/list/peek, а не chat.",
       "",
       'Сомневаешься между командой и chat — выбирай команду: худший случай — лишний,',
       "но верный ответ, а не отказ там, где ты мог помочь.",
@@ -669,6 +712,10 @@ export async function startBot(): Promise<void> {
         case "status":
           await clear();
           await handleStatus(ctx);
+          break;
+        case "metrics":
+          await clear();
+          await handleMetrics(ctx);
           break;
         case "budget":
           await clear();

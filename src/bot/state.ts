@@ -16,6 +16,10 @@ export interface TaskRecord {
   // than assume every record has them.
   durationMs?: number;
   repo?: string;
+  // Same optional-field reasoning as durationMs/repo above: absent on records from
+  // before this existed, and on any outcome where review never ran (disabled, or the
+  // agent errored out before a commit).
+  reviewRounds?: number;
   timestamp: string;
 }
 
@@ -58,6 +62,7 @@ export function recordOutcome(state: BotState, outcome: QueueRunOutcome): void {
     costUsd: "costUsd" in outcome ? outcome.costUsd : 0,
     durationMs: "durationMs" in outcome ? outcome.durationMs : undefined,
     repo: "repo" in outcome ? outcome.repo : undefined,
+    reviewRounds: "reviewRounds" in outcome ? outcome.reviewRounds : undefined,
     timestamp: new Date().toISOString(),
   });
 }
@@ -125,4 +130,74 @@ export function startOfTodayIso(): string {
   const d = new Date();
   d.setHours(0, 0, 0, 0);
   return d.toISOString();
+}
+
+export interface RepoMetrics {
+  total: number;
+  closed: number;
+  needsHuman: number;
+}
+
+export interface Metrics {
+  totalTasks: number;
+  closedCount: number;
+  needsHumanCount: number;
+  escalationRate: number;
+  avgCostUsd: number;
+  medianCostUsd: number;
+  avgDurationMs: number | null;
+  medianDurationMs: number | null;
+  // Scoped to closed tasks only, unlike the other fields above — see computeMetrics.
+  avgReviewRounds: number | null;
+  byRepo: Record<string, RepoMetrics>;
+}
+
+// Historical track record across every task that reached a real terminal outcome
+// ("closed" or "needs_human") — unlike estimateCost above, this isn't a per-task
+// forecast gated on sample size, it's "how has the harness actually done so far", so
+// it always uses the full history and never falls back to a smaller/larger pool.
+// "skipped" (ambiguous routing, cancelled before real work) doesn't belong in either
+// number: it was never a real attempt the harness could have escalated or closed.
+export function computeMetrics(state: BotState): Metrics | null {
+  const real = state.history.filter((r) => r.outcome === "closed" || r.outcome === "needs_human");
+  if (real.length === 0) return null;
+
+  const closed = real.filter((r) => r.outcome === "closed");
+  const needsHuman = real.filter((r) => r.outcome === "needs_human");
+
+  const costs = real.map((r) => r.costUsd).sort((a, b) => a - b);
+  const durations = real
+    .map((r) => r.durationMs)
+    .filter((d): d is number => typeof d === "number" && d > 0)
+    .sort((a, b) => a - b);
+  // Closed tasks only: a needs_human escalation out of the review<->dev loop already
+  // has its own distinct reason ("review_blocked" in the Jira comment) — averaging its
+  // round count in with ordinary closes would conflate "review negotiated a fix" with
+  // "review gave up after MAX_REVIEW_ROUNDS", two very different outcomes.
+  const reviewRounds = closed
+    .map((r) => r.reviewRounds)
+    .filter((n): n is number => typeof n === "number")
+    .sort((a, b) => a - b);
+
+  const byRepo: Record<string, RepoMetrics> = {};
+  for (const r of real) {
+    const key = r.repo ?? "unknown";
+    byRepo[key] ??= { total: 0, closed: 0, needsHuman: 0 };
+    byRepo[key].total += 1;
+    if (r.outcome === "closed") byRepo[key].closed += 1;
+    else byRepo[key].needsHuman += 1;
+  }
+
+  return {
+    totalTasks: real.length,
+    closedCount: closed.length,
+    needsHumanCount: needsHuman.length,
+    escalationRate: needsHuman.length / real.length,
+    avgCostUsd: average(costs),
+    medianCostUsd: median(costs),
+    avgDurationMs: durations.length > 0 ? average(durations) : null,
+    medianDurationMs: durations.length > 0 ? median(durations) : null,
+    avgReviewRounds: reviewRounds.length > 0 ? average(reviewRounds) : null,
+    byRepo,
+  };
 }

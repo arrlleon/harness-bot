@@ -33,8 +33,8 @@ import type { CloseLoopResult, EngineConfig, GateSpec, QueueRunOutcome, TaskSpec
 type JobOutcome =
   | { kind: "busy"; issueKey: string }
   | { kind: "skipped"; issueKey: string; reason: string }
-  | { kind: "needs_human"; issueKey: string; costUsd: number; reason: string; worktreeDir: string; branchName: string }
-  | { kind: "closed"; issueKey: string; costUsd: number; mrUrl: string }
+  | { kind: "needs_human"; issueKey: string; costUsd: number; reason: string; worktreeDir: string; branchName: string; reviewRounds?: number }
+  | { kind: "closed"; issueKey: string; costUsd: number; mrUrl: string; reviewRounds?: number }
   | { kind: "brief_pending"; issueKey: string };
 
 const QUEUE_JQL = () =>
@@ -697,6 +697,7 @@ async function handleCloseLoopOutcome(
       reason: outcome.failureReason!,
       worktreeDir: result.worktreeDir,
       branchName,
+      reviewRounds: result.reviewRounds,
     };
   }
 
@@ -708,7 +709,7 @@ async function handleCloseLoopOutcome(
   await jira.transitionTo(issue.key, config.jira.reviewStatus);
   await cleanupWorktree(repo.path, result.worktreeDir, branchName);
   clearCheckpoint(issue.key);
-  return { kind: "closed", issueKey: issue.key, costUsd: result.totalCostUsd, mrUrl: outcome.mrUrl! };
+  return { kind: "closed", issueKey: issue.key, costUsd: result.totalCostUsd, mrUrl: outcome.mrUrl!, reviewRounds: result.reviewRounds };
 }
 
 // Shared by the single-repo and cross-repo success comments — the whole point of the
@@ -716,6 +717,14 @@ async function handleCloseLoopOutcome(
 // to go dig through the MR, so it rides along in the same comment as the MR link.
 function testingNotesSection(notes: string | undefined): string {
   return notes ? `\n\nКак тестировать:\n${notes}` : "";
+}
+
+// Cross-repo: backend and frontend each run their own independent review, under the
+// same REVIEW_ENABLED config — so reviewRounds is either present on both or absent on
+// both, never a meaningful mix. undefined only when review never ran for either half.
+function sumReviewRounds(...results: Array<{ reviewRounds?: number }>): number | undefined {
+  const defined = results.map((r) => r.reviewRounds).filter((n): n is number => n !== undefined);
+  return defined.length > 0 ? defined.reduce((a, b) => a + b, 0) : undefined;
 }
 
 // Called only once a task is genuinely done (MR opened, accepted after human review) —
@@ -777,6 +786,7 @@ async function runCrossRepoJob(
       reason,
       worktreeDir: backendResult.worktreeDir,
       branchName: backend.branchName,
+      reviewRounds: backendResult.reviewRounds,
     };
   }
 
@@ -808,6 +818,7 @@ async function runCrossRepoJob(
       reason,
       worktreeDir: backendResult.worktreeDir,
       branchName: backend.branchName,
+      reviewRounds: backendResult.reviewRounds,
     };
   }
 
@@ -865,6 +876,7 @@ async function runCrossRepoJob(
       reason,
       worktreeDir: frontendResult.worktreeDir,
       branchName: frontend.branchName,
+      reviewRounds: sumReviewRounds(backendResult, frontendResult),
     };
   }
 
@@ -897,6 +909,7 @@ async function runCrossRepoJob(
       reason,
       worktreeDir: frontendResult.worktreeDir,
       branchName: frontend.branchName,
+      reviewRounds: sumReviewRounds(backendResult, frontendResult),
     };
   }
 
@@ -925,6 +938,7 @@ async function runCrossRepoJob(
     issueKey: issue.key,
     costUsd: totalCostUsd,
     mrUrl: `backend: ${backendOutcome.mrUrl}, frontend: ${frontendOutcome.mrUrl}`,
+    reviewRounds: sumReviewRounds(backendResult, frontendResult),
   };
 }
 
