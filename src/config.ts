@@ -100,8 +100,12 @@ export const config = {
     // read-only turn per successful task, not a loop — Sonnet, same tier as propose.
     memory: process.env.MEMORY_MODEL ?? "claude-sonnet-5",
     // Catching what gates can't (architecture, security, edge cases) needs real
-    // capability, not just a bounded turn to save cost — Opus, same tier as implement.
-    review: process.env.REVIEW_MODEL ?? "claude-opus-5",
+    // capability, not just a bounded turn to save cost — same tier as implement, but
+    // deliberately a different model lineage (not just a smaller Opus), the same way
+    // ETS Tender's own review intentionally doesn't share a model with its developer
+    // role: a reviewer built the same way as the implementer is more likely to share
+    // its blind spots, not just its strengths.
+    review: process.env.REVIEW_MODEL ?? "claude-fable-5-1",
     // Writing a tester's walkthrough from a diff + task description is the same
     // bounded-judgment shape as propose/acceptance/memory, not an open-ended loop —
     // Sonnet, same tier as those.
