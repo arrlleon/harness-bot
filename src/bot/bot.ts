@@ -852,5 +852,11 @@ export async function startBot(): Promise<void> {
   });
 
   console.log(`[bot] starting, allowed chats: ${config.telegram.allowedChatIds.join(", ")}`);
-  await bot.start();
+  // setBotRunning(false) above only covers "a stale `true` survived a crash"; nothing
+  // ever set it back to true, so /api/state's botRunning was permanently false the
+  // entire time the bot was actually up and handling messages (reproduced live:
+  // dashboard showed "not running" while a real job was mid-flight). grammY's onStart
+  // fires once getMe succeeds and polling has actually begun — the earliest point
+  // "the bot is running" is true, not just "the process started".
+  await bot.start({ onStart: () => setBotRunning(true) });
 }
