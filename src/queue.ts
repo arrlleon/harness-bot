@@ -1,11 +1,11 @@
-import { config } from "./config.js";
+import { config, type RepoKind } from "./config.js";
 import { JiraClient, type JiraIssue } from "./jira/client.js";
-import { detectRepo, toTaskSpec, type RepoDetection } from "./jira/mapToTask.js";
+import { detectRepo, toTaskSpec, retagTitle, type RepoDetection } from "./jira/mapToTask.js";
 import { runCloseLoop } from "./engine/loop.js";
 import { buildBriefAnswerPrompt } from "./engine/brief.js";
 import { buildContinuationPrompt } from "./engine/prompts.js";
 import { runClaudeTurn } from "./engine/claudeEngine.js";
-import { parseProposalResponse } from "./engine/proposal.js";
+import { parseProposalResponse, parseWrongRepoSignal } from "./engine/proposal.js";
 import { readMemoryFiles, buildMemoryContextBlock } from "./engine/memory.js";
 import { createMergeRequest, pushBranch } from "./gitlab.js";
 import {
@@ -117,14 +117,40 @@ const declinedKeys = new Set<string>();
 // change them (TaskSpec is never mutated after dispatch). Reduces scope drift the same
 // way Avengers Harness's frozen-acceptance-tests idea does, just without a separate
 // executable-test layer.
-async function proposeSolution(task: TaskSpec, repoPath: string): Promise<{ plan: string; acceptanceCriteria: string[]; costUsd: number }> {
+// allowRepoRedirect is only ever true from proposeIssue's single-repo branch below —
+// proposeCrossRepoSolution's two calls (one per repo, both genuinely in scope for a
+// cross-repo ticket) never pass it, so they get the exact prompt this always used to
+// send, unaffected by REPO_RETAG_ENABLED either way.
+async function proposeSolution(
+  task: TaskSpec,
+  repoPath: string,
+  allowRepoRedirect?: { thisRepo: RepoKind },
+): Promise<{ plan: string; acceptanceCriteria: string[]; costUsd: number; wrongRepo?: RepoKind }> {
   const memoryContext = buildMemoryContextBlock(await readMemoryFiles(repoPath, "pm"), "pm");
+  const otherRepo: RepoKind | null = allowRepoRedirect
+    ? allowRepoRedirect.thisRepo === "backend"
+      ? "frontend"
+      : "backend"
+    : null;
   const prompt = [
     `Задача ${task.id}: ${task.title}`,
     "",
     task.description,
     memoryContext ? `\n${memoryContext}\n` : "",
     "Не редактируй и не создавай файлы — только изучи код (Read/Grep/Glob).",
+    otherRepo
+      ? [
+          `Ты сейчас смотришь ${allowRepoRedirect!.thisRepo}-репозиторий (так тикет был помечен тегом).`,
+          `Если по ходу изучения кода выяснится, что реальный фикс целиком должен быть сделан`,
+          `в ${otherRepo} — а в этом репозитории менять нечего вообще — не пиши план по этому`,
+          `репозиторию. Вместо этого ответь РОВНО одной строкой, без ПЛАН/КРИТЕРИИ:`,
+          `РЕПОЗИТОРИЙ: ${otherRepo}`,
+          `Так тикет переанализируют по правильному репозиторию, а не закроют половинчатым`,
+          `планом вида "сообщить другой команде". Если репозиторий всё же тот — просто`,
+          `отвечай как обычно, без этой строки.`,
+          "",
+        ].join("\n")
+      : "",
     "Ответь строго в этом формате, на русском:",
     "",
     "ПЛАН:",
@@ -143,6 +169,10 @@ async function proposeSolution(task: TaskSpec, repoPath: string): Promise<{ plan
     disallowedToolsOverride: "Bash,Edit,Write,MultiEdit",
     model: config.models.propose,
   });
+  const wrongRepo = otherRepo ? (parseWrongRepoSignal(turn.resultText) ?? undefined) : undefined;
+  if (wrongRepo) {
+    return { plan: "", acceptanceCriteria: [], costUsd: turn.totalCostUsd, wrongRepo };
+  }
   const { plan, acceptanceCriteria } = parseProposalResponse(turn.resultText);
   return { plan, acceptanceCriteria, costUsd: turn.totalCostUsd };
 }
@@ -246,9 +276,10 @@ async function proposeIssue(
     };
   }
 
-  const repo = config.repos[detection.kind];
+  let repoKind: RepoKind = detection.kind;
+  let repo = config.repos[repoKind];
   if (!repo.path) {
-    throw new Error(`Repo path for "${detection.kind}" is not configured (set ${detection.kind.toUpperCase()}_REPO_PATH)`);
+    throw new Error(`Repo path for "${repoKind}" is not configured (set ${repoKind.toUpperCase()}_REPO_PATH)`);
   }
 
   // The analysis turn below can take a while against a real codebase — tell
@@ -256,14 +287,38 @@ async function proposeIssue(
   // multi-minute silent gap reads as "it's stuck", not "it's thinking").
   await onAnalyzing?.(issue.key);
 
+  let title = issue.summary;
   const task = toTaskSpec(issue);
-  const { plan, acceptanceCriteria, costUsd } = await proposeSolution(task, repo.path);
-  const costEstimate = estimateCost(loadState(), detection.kind);
+  let result = await proposeSolution(task, repo.path, config.repoRetagEnabled ? { thisRepo: repoKind } : undefined);
+  let costUsd = result.costUsd;
+
+  // Tagged for the wrong repo (reproduced live, XEN-541: tagged [frontend], real fix
+  // was backend-only) — retag and re-analyze against the repo the propose turn actually
+  // named, instead of freezing a "tell the other team" non-fix as this ticket's plan.
+  // Capped at one redirect: if the SECOND propose turn says "wrong repo" again too
+  // (whatever repo that would even mean here — only two exist), just use whatever it
+  // came back with rather than ping-ponging forever.
+  if (result.wrongRepo && result.wrongRepo !== repoKind && config.repos[result.wrongRepo].path) {
+    const correctedTitle = retagTitle(issue.summary, result.wrongRepo);
+    await jira.updateSummary(issue.key, correctedTitle);
+    await jira.addComment(
+      issue.key,
+      `jira-harness: при анализе выяснилось, что фикс нужен в ${result.wrongRepo}, а не ${repoKind} — поменял тег в заголовке и беру в работу ${result.wrongRepo}.`,
+    );
+    title = correctedTitle;
+    repoKind = result.wrongRepo;
+    repo = config.repos[repoKind];
+    result = await proposeSolution({ ...task, title: correctedTitle }, repo.path, config.repoRetagEnabled ? { thisRepo: repoKind } : undefined);
+    costUsd += result.costUsd;
+  }
+
+  const { plan, acceptanceCriteria } = result;
+  const costEstimate = estimateCost(loadState(), repoKind);
 
   setPendingApproval({
     issueKey: issue.key,
-    title: issue.summary,
-    repo: detection.kind,
+    title,
+    repo: repoKind,
     description: issue.description,
     descriptionShort: issue.description.slice(0, 300),
     plan,
@@ -276,8 +331,8 @@ async function proposeIssue(
     kind: "proposed",
     proposal: {
       issueKey: issue.key,
-      title: issue.summary,
-      repo: detection.kind,
+      title,
+      repo: repoKind,
       descriptionShort: issue.description.slice(0, 300),
       plan,
       acceptanceCriteria,

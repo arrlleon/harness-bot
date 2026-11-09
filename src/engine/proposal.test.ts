@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseProposalResponse } from "./proposal.js";
+import { parseProposalResponse, parseWrongRepoSignal } from "./proposal.js";
 
 test("parses a well-formed response into plan and criteria list", () => {
   const text = [
@@ -45,6 +45,23 @@ test("returns an empty criteria list (not a crash) when the heading has no bulle
   const result = parseProposalResponse(text);
   assert.equal(result.plan, "x");
   assert.deepEqual(result.acceptanceCriteria, []);
+});
+
+test("parseWrongRepoSignal: recognizes 'РЕПОЗИТОРИЙ: backend' at the start of the response", () => {
+  assert.equal(parseWrongRepoSignal("РЕПОЗИТОРИЙ: backend"), "backend");
+});
+
+test("parseWrongRepoSignal: recognizes frontend too, and is case-insensitive", () => {
+  assert.equal(parseWrongRepoSignal("репозиторий: FRONTEND"), "frontend");
+});
+
+test("parseWrongRepoSignal: null for a normal plan that just happens to mention 'backend' later on", () => {
+  const text = ["ПЛАН:", "Фронтовая правка, бэкенд (backend) трогать не нужно.", "", "КРИТЕРИИ ПРИЁМКИ:", "- ок"].join("\n");
+  assert.equal(parseWrongRepoSignal(text), null);
+});
+
+test("parseWrongRepoSignal: null for freeform text with no signal at all", () => {
+  assert.equal(parseWrongRepoSignal("Просто обычный план без сигнала."), null);
 });
 
 test("ignores stray '-'/'*' lines that appear before the criteria heading", () => {

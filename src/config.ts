@@ -163,6 +163,15 @@ export const config = {
   // possibly-stale local HEAD, so gates/acceptance tests run against what the MR will
   // actually be merged into, not whatever a human last happened to have checked out.
   freshBaseEnabled: (process.env.FRESH_BASE_ENABLED ?? "true") !== "false",
+  // Same opt-out shape. Reproduced live (XEN-541): tagged [frontend], but the propose
+  // turn found the real fix was entirely backend-side — without this, that's either a
+  // needs_human escalation or a proposal whose only "acceptance criteria" are "tell the
+  // backend team", neither of which actually closes anything. Lets queue.ts retag the
+  // ticket and re-propose against the other repo instead of treating a simple tagging
+  // mistake as a stopper. Off reverts to the old behavior: the propose turn is never
+  // told it can redirect, and would just write whatever plan it can for the repo it
+  // was handed.
+  repoRetagEnabled: (process.env.REPO_RETAG_ENABLED ?? "true") !== "false",
   maxIterations: Number(process.env.MAX_ITERATIONS ?? 5),
   maxBudgetUsd: Number(process.env.MAX_BUDGET_USD ?? 5),
   // A resumed session's answer quality degrades well before this many tokens would

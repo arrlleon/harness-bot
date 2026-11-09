@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { detectRepo, toTaskSpec } from "./mapToTask.js";
+import { detectRepo, retagTitle, toTaskSpec } from "./mapToTask.js";
 import type { JiraIssue } from "./client.js";
 
 function issue(summary: string, description = ""): JiraIssue {
@@ -33,6 +33,22 @@ test("detectRepo: both tags present is ambiguous, not a silent pick", () => {
 
 test("detectRepo: no tag at all is unknown, not a default", () => {
   assert.deepEqual(detectRepo(issue("fix the thing, no prefix")), { kind: "unknown" });
+});
+
+test("retagTitle: replaces a [frontend] tag with [backend]", () => {
+  assert.equal(retagTitle("[frontend] fix the thing", "backend"), "[backend] fix the thing");
+});
+
+test("retagTitle: [web] (frontend's alias) is also stripped, not left dangling alongside the new tag", () => {
+  assert.equal(retagTitle("[web] fix the thing", "backend"), "[backend] fix the thing");
+});
+
+test("retagTitle: strips every existing tag, not just the first — a leftover second tag would make the ticket ambiguous again", () => {
+  assert.equal(retagTitle("[frontend][backend] fix the thing", "backend"), "[backend] fix the thing");
+});
+
+test("retagTitle: adds the tag even if the title had none at all", () => {
+  assert.equal(retagTitle("fix the thing", "frontend"), "[frontend] fix the thing");
 });
 
 test("toTaskSpec: maps issue fields straight through with empty acceptance criteria", () => {

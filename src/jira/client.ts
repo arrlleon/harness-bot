@@ -90,6 +90,17 @@ export class JiraClient {
     });
   }
 
+  // Used by queue.ts's repo-retag path (propose found the ticket tagged for the wrong
+  // repo) — rewrites the human-visible title too, not just the harness's own in-memory
+  // copy, so anyone reading the ticket later sees the corrected tag rather than a stale
+  // one that no longer matches what's actually being worked.
+  async updateSummary(issueKey: string, summary: string): Promise<void> {
+    await this.request(`/rest/api/2/issue/${issueKey}`, {
+      method: "PUT",
+      body: JSON.stringify({ fields: { summary } }),
+    });
+  }
+
   async addComment(issueKey: string, body: string): Promise<void> {
     await this.request(`/rest/api/2/issue/${issueKey}/comment`, {
       method: "POST",

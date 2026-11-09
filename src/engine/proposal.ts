@@ -1,3 +1,5 @@
+import type { RepoKind } from "../config.js";
+
 // Splits the propose-turn's free-text response into a plan and a list of acceptance
 // criteria. The model is asked to label a "КРИТЕРИИ ПРИЁМКИ:" section with one
 // criterion per bulleted line — this just extracts that structure back out so the
@@ -6,6 +8,19 @@
 const CRITERIA_HEADING = /критерии\s+при[её]мки\s*:?/i;
 const PLAN_LABEL = /^план\s*:?\s*/i;
 const BULLET_LINE = /^[-*•]\s+(.+)$/gm;
+
+// Checked before the ПЛАН/КРИТЕРИИ parse above: a propose turn told to answer with
+// exactly one "РЕПОЗИТОРИЙ: backend|frontend" line instead, when it finds the real fix
+// belongs entirely in the OTHER repo from the one it's reading (queue.ts's prompt asks
+// for this explicitly — see proposeSolution). Anchored to the start of the response: a
+// mention of "backend"/"frontend" anywhere else in a normal plan must never be mistaken
+// for this signal.
+const WRONG_REPO_SIGNAL = /^\s*репозитори[йя]\s*:?\s*(backend|frontend)\b/i;
+
+export function parseWrongRepoSignal(text: string): RepoKind | null {
+  const match = WRONG_REPO_SIGNAL.exec(text);
+  return match ? (match[1].toLowerCase() as RepoKind) : null;
+}
 
 export interface ParsedProposal {
   plan: string;
