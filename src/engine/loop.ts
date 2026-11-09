@@ -415,7 +415,10 @@ export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promis
     acceptanceTestPath = config.resumeFrom.acceptanceTestPath;
     baselines = config.resumeFrom.baselines;
     prompt = config.resumeFrom.prompt;
-    resumeSessionId = config.resumeFrom.sessionId;
+    // freshSession (context_budget only — see CloseLoopResumeState's own comment)
+    // deliberately leaves this unset: the turn below then starts a brand-new session
+    // instead of `--resume`-ing the one whose context was the actual problem.
+    resumeSessionId = config.resumeFrom.freshSession ? undefined : config.resumeFrom.sessionId;
     previousFingerprint = config.resumeFrom.previousFingerprint;
     startIteration = config.resumeFrom.iteration;
   } else {
@@ -535,9 +538,13 @@ export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promis
     }
 
     // A resumed session's quality degrades well before this hits the model's hard
-    // window limit, and there is no proven-safe way yet to hand off to a fresh session
-    // mid-task without losing what the agent already knows — so this stops and asks a
-    // human, the same answer the loop already gives for max_iterations/max_budget/stuck.
+    // window limit — continuing THIS session is never safe, so this stops and asks a
+    // human by default, same as max_iterations/max_budget/stuck. resumeState is still
+    // set here (unlike those) with freshSession: true: a human can explicitly choose
+    // to continue anyway (queue.ts's continueNeedsHuman) with a brand-new session fed
+    // the current diff instead of `--resume`'s conversation history — a real, known
+    // tradeoff (that session won't know what this one already tried), which is exactly
+    // why it's never automatic.
     const contextTokens = totalContextTokens(turn.usage);
     if (config.maxContextTokens && contextTokens >= config.maxContextTokens) {
       return {
@@ -549,6 +556,31 @@ export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promis
         worktreeDir,
         acceptanceTestPath,
         contextTokens,
+        resumeState: {
+          sessionId: resumeSessionId,
+          worktreeDir,
+          // 0, not i+1: this starts a brand-new session (see freshSession above),
+          // which gets its own fresh run through config.maxIterations rather than
+          // inheriting however much of the original budget this stopped session had
+          // already used. Without this, a context_budget stop on the last allowed
+          // iteration would make "continue" immediately report max_iterations without
+          // the fresh session getting a single turn.
+          iteration: 0,
+          totalCostUsd,
+          gates,
+          baselines,
+          extraDeniedPaths,
+          acceptanceTestPath,
+          // Not previousFingerprint from the stopped session: the stuck-detector's
+          // whole premise is the SAME session failing identically across its own
+          // consecutive turns. A fresh session's first turn can land on the exact
+          // same (still-unfixed) failure the old one last saw without that meaning
+          // anything about THIS session being stuck — it hasn't had a second attempt
+          // yet. Carrying the old fingerprint over would let one coincidental match
+          // call it stuck on turn one.
+          previousFingerprint: undefined,
+          freshSession: true,
+        },
       };
     }
 

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildFeedbackPrompt, buildInitialPrompt } from "./prompts.js";
+import { buildContinuationPrompt, buildFeedbackPrompt, buildInitialPrompt } from "./prompts.js";
 import type { GateResult, TaskSpec } from "../types.js";
 
 test("buildInitialPrompt includes task id, title, description, and numbered criteria", () => {
@@ -37,6 +37,35 @@ test("buildInitialPrompt omits the brief instructions when briefsEnabled is fals
   const task: TaskSpec = { id: "XEN-42", title: "Fix the thing", description: "It is broken.", acceptanceCriteria: [] };
   const prompt = buildInitialPrompt(task, "", false);
   assert.doesNotMatch(prompt, /БРИФ/);
+});
+
+test("buildContinuationPrompt includes task id, title, criteria, and the diff verbatim", () => {
+  const task: TaskSpec = {
+    id: "XEN-539",
+    title: "Show the department in the folder access modal",
+    description: "Only the creator shows up today.",
+    acceptanceCriteria: ["Department row appears", "Level matches FolderFormModal"],
+  };
+  const diff = "diff --git a/x.tsx b/x.tsx\n+ added a line";
+  const prompt = buildContinuationPrompt(task, diff);
+  assert.match(prompt, /XEN-539/);
+  assert.match(prompt, /Show the department in the folder access modal/);
+  assert.match(prompt, /1\. Department row appears/);
+  assert.match(prompt, /2\. Level matches FolderFormModal/);
+  assert.match(prompt, /added a line/);
+});
+
+test("buildContinuationPrompt says the previous session stopped on its own context budget, not that the work is done", () => {
+  const task: TaskSpec = { id: "XEN-539", title: "t", description: "d", acceptanceCriteria: [] };
+  const prompt = buildContinuationPrompt(task, "diff --git a/x b/x");
+  assert.match(prompt, /context window/);
+  assert.match(prompt, /not because the work was finished or verified/);
+});
+
+test("buildContinuationPrompt includes brief instructions by default and omits them when disabled", () => {
+  const task: TaskSpec = { id: "XEN-539", title: "t", description: "d", acceptanceCriteria: [] };
+  assert.match(buildContinuationPrompt(task, "diff"), /БРИФ/);
+  assert.doesNotMatch(buildContinuationPrompt(task, "diff", false), /БРИФ/);
 });
 
 test("buildFeedbackPrompt reports each failing gate in its own labeled section", () => {

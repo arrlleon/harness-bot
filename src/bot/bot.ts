@@ -25,6 +25,7 @@ import {
   proposeIssueByKey,
   getPendingHumanReviewDiff,
   resolveHumanReview,
+  continueNeedsHuman,
   resolveBrief,
   type Proposal,
   type Candidate,
@@ -217,6 +218,15 @@ async function sendNeedsHumanReview(
   const keyboard = new InlineKeyboard()
     .text("✅ Принять и запушить", `accept_human:${outcome.issueKey}`)
     .text("❌ Отклонить", `reject_human:${outcome.issueKey}`);
+  // Only ever present for a context_budget stop (single-repo — see queue.ts's two
+  // commented-out cross-repo resumeState assignments for why cross-repo doesn't get
+  // this button). A human clicking it is explicitly accepting a known tradeoff — a
+  // fresh session with no memory of what the stopped one already tried — so it's
+  // offered, never assumed; every other needs_human reason has no resumeState and
+  // never shows this third button at all.
+  if (getLiveState().pendingHumanReview?.resumeState) {
+    keyboard.row().text("🔄 Продолжить (новая сессия)", `continue_human:${outcome.issueKey}`);
+  }
   await send(text, keyboard);
 }
 
@@ -673,6 +683,39 @@ export async function startBot(): Promise<void> {
     resolveHumanReview(false)
       .then(() => sendTicketMenu(ctx, "Что дальше?"))
       .catch((err: Error) => ctx.reply(`❌ ${key}: не удалось отклонить — ${err.message}`));
+  });
+
+  bot.callbackQuery(/^continue_human:(.+)$/, async (ctx) => {
+    const key = ctx.match[1];
+    const pending = getLiveState().pendingHumanReview;
+    if (!pending || pending.issueKey !== key || !pending.resumeState) {
+      await ctx.answerCallbackQuery({ text: "Это уже неактуально.", show_alert: true });
+      return;
+    }
+    await ctx.answerCallbackQuery({ text: "Запускаю новую сессию… 🛠️" });
+    const original = ctx.callbackQuery.message?.text ?? `${key}`;
+    await ctx.editMessageText(original + "\n\n🔄 Продолжаю новой сессией… 🛠️").catch(() => {});
+
+    continueNeedsHuman()
+      .then(async (outcome) => {
+        if (!outcome) return;
+        recordOutcome(state, outcome);
+        if (outcome.kind === "needs_human") {
+          await sendNeedsHumanReview((text, keyboard) => ctx.reply(text, keyboard ? { reply_markup: keyboard } : undefined), outcome);
+        } else if (outcome.kind === "brief_pending") {
+          const next = getLiveState().pendingBrief;
+          if (next)
+            await ctx.reply(formatBrief(next.issueKey, next.brief, next.crossRepo?.stage), {
+              reply_markup: briefKeyboard(next.issueKey, next.brief),
+            });
+          return;
+        } else {
+          const text = describeOutcome(outcome);
+          if (text) await ctx.reply(text);
+        }
+        await sendTicketMenu(ctx, "Что дальше?");
+      })
+      .catch((err: Error) => ctx.reply(`❌ ${key}: не удалось продолжить — ${err.message}`));
   });
 
   bot.callbackQuery(/^brief_answer:([^:]+):(\d+)$/, async (ctx) => {

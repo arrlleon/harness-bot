@@ -52,6 +52,19 @@ export interface CloseLoopResumeState {
   // resumed fix turn goes on to break a gate — reviewChanges isn't re-run before this,
   // since the diff hasn't changed since the brief was raised.
   reviewResume?: { round: number; blocking: ReviewFinding[] };
+  // True only for a context_budget resume (queue.ts's continueNeedsHuman) — every
+  // other resumeFrom use (brief, review-fix brief) reuses `sessionId` via `--resume` on
+  // purpose, because the paused turn's own reasoning is exactly what the resumed turn
+  // still needs. A context_budget stop is different: that session's quality was
+  // already degrading before it even hit this check (see runCloseLoop's own comment
+  // where context_budget is checked) — resuming it would just continue the same
+  // degradation the check exists to catch. `freshSession: true` tells runCloseLoop to
+  // ignore `sessionId` and start a brand-new one instead, told what happened so far via
+  // a diff in its first prompt rather than `--resume`'s conversation history. This is a
+  // real, acknowledged tradeoff (a fresh session has no memory of what the old one
+  // already tried or why), which is exactly why it only ever happens on an explicit
+  // human click (the "🔄 Продолжить" button), never automatically.
+  freshSession?: boolean;
 }
 
 // Present only on a brief raised during a cross-repo task's backend or frontend half —
@@ -317,9 +330,11 @@ export interface CloseLoopResult {
   // cache_creation token count that tripped maxContextTokens, for the needs_human
   // reason text.
   contextTokens?: number;
-  // Both set only when stopReason is "brief_pending" — the question to put in front of
-  // the human, and everything needed to resume this exact session once they answer
-  // (see resolveBrief in queue.ts and CloseLoopResumeState above).
+  // `brief` is set only when stopReason is "brief_pending" — the question to put in
+  // front of the human. `resumeState` is set for "brief_pending" (resolveBrief,
+  // queue.ts, resumes the exact session) AND for "context_budget" (continueNeedsHuman,
+  // queue.ts, resumes with `freshSession: true` instead — see that field's own comment).
+  // Absent for every other stopReason: nothing else here is resumable.
   brief?: Brief;
   resumeState?: CloseLoopResumeState;
 }

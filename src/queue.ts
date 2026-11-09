@@ -3,6 +3,7 @@ import { JiraClient, type JiraIssue } from "./jira/client.js";
 import { detectRepo, toTaskSpec, type RepoDetection } from "./jira/mapToTask.js";
 import { runCloseLoop } from "./engine/loop.js";
 import { buildBriefAnswerPrompt } from "./engine/brief.js";
+import { buildContinuationPrompt } from "./engine/prompts.js";
 import { runClaudeTurn } from "./engine/claudeEngine.js";
 import { parseProposalResponse } from "./engine/proposal.js";
 import { readMemoryFiles, buildMemoryContextBlock } from "./engine/memory.js";
@@ -698,6 +699,7 @@ async function handleCloseLoopOutcome(
       gitlabProjectPath: repo.gitlabProjectPath,
       description: task.description,
       acceptanceCriteria: task.acceptanceCriteria,
+      resumeState: result.resumeState,
     });
     // pendingHumanReview is now the durable record for this task — the checkpoint
     // would just be redundant from here (recoverOrphanedCheckpoints already skips an
@@ -901,6 +903,14 @@ async function afterBackendAttempt(
       gitlabProjectPath: backend.repo.gitlabProjectPath,
       description: backend.task.description,
       acceptanceCriteria: backend.task.acceptanceCriteria,
+      // Deliberately NOT resumeState: backendResult.resumeState — continueNeedsHuman
+      // only knows how to finish a single repo (push, open its MR, done). A cross-repo
+      // backend half that continues and succeeds still needs to hand its diff to the
+      // frontend half afterward (see the brief_pending branch above, a few lines up,
+      // for the real handoff) — continueNeedsHuman has no path to do that, so offering
+      // it here would silently skip the frontend half entirely on success. Scoped out
+      // rather than half-built; the "🔄 Продолжить" button simply won't appear for a
+      // cross-repo backend-half needs_human until this is worth building properly.
     });
     clearCheckpoint(issue.key);
     return {
@@ -1022,6 +1032,12 @@ async function afterFrontendAttempt(
       gitlabProjectPath: frontend.repo.gitlabProjectPath,
       description: frontend.task.description,
       acceptanceCriteria: frontend.task.acceptanceCriteria,
+      // Deliberately NOT resumeState: frontendResult.resumeState — same reasoning as
+      // the backend-half call site above: continueNeedsHuman has no access to
+      // backendInfo (backend's own MR/cost/testingNotes), which afterFrontendAttempt's
+      // own success path needs for the combined "both halves done" Jira comment.
+      // Reusing the generic single-repo path here would silently drop the backend MR
+      // reference from that comment. Scoped out rather than half-built.
     });
     clearCheckpoint(issue.key);
     return {
@@ -1116,6 +1132,50 @@ export async function resolveHumanReview(accept: boolean): Promise<{ mrUrl: stri
   await jira.transitionTo(pending.issueKey, config.jira.reviewStatus);
   await cleanupWorktree(repoPath, pending.worktreeDir, pending.branchName);
   return { mrUrl: mr.webUrl };
+}
+
+const MAX_CONTINUATION_DIFF_CHARS = 8000; // same weight class as review.ts's/cross-repo's own diff caps
+
+// A human explicitly chose to continue a context_budget needs_human with a fresh
+// session (the "🔄 Продолжить" button — see PendingHumanReview.resumeState and
+// CloseLoopResumeState.freshSession for why this is opt-in, never automatic). Only
+// ever reachable when resumeState is set, which is itself only ever set for a
+// single-repo task (see the two commented-out cross-repo call sites above) — no
+// crossRepo branching needed here the way resolveBrief has.
+export async function continueNeedsHuman(): Promise<QueueRunOutcome | null> {
+  const pending = getLiveState().pendingHumanReview;
+  if (!pending?.resumeState) return null;
+  clearPendingHumanReview();
+
+  const jira = new JiraClient(config.jira.baseUrl, config.jira.token);
+  const repo = repoConfigFor(pending.gitlabProjectPath);
+  const issue = { key: pending.issueKey, summary: pending.title };
+  const task: TaskSpec = {
+    id: pending.issueKey,
+    title: pending.title,
+    description: pending.description,
+    acceptanceCriteria: pending.acceptanceCriteria,
+  };
+
+  // startJob before the first await (getWorktreeDiff) — same ordering resolveBrief/
+  // resolveHumanReview already rely on: clearPendingHumanReview() just above and
+  // startJob() here both have to land with no await between them, or hasUnresolvedWork()
+  // would see neither pendingHumanReview nor currentJob set for a real tick and let a
+  // second proposal slip in underneath this one.
+  startJob(pending.issueKey, pending.title, pending.description, pending.gitlabProjectPath, config.maxIterations);
+  const startedAt = Date.now();
+  try {
+    const diff = await getWorktreeDiff(pending.resumeState.worktreeDir, config.gitlab.targetBranch);
+    const prompt = buildContinuationPrompt(task, diff.slice(0, MAX_CONTINUATION_DIFF_CHARS));
+    const outcome = await closeLoopAndPush(issue, repo, task, pending.branchName, { ...pending.resumeState, prompt });
+    const jobOutcome = await handleCloseLoopOutcome(jira, issue, repo, task, pending.branchName, outcome);
+    if (jobOutcome.kind === "closed" || jobOutcome.kind === "needs_human") {
+      return { ...jobOutcome, durationMs: Date.now() - startedAt, repo: pending.gitlabProjectPath };
+    }
+    return jobOutcome;
+  } finally {
+    finishJob();
+  }
 }
 
 // The human picked an option for a brief the agent raised instead of guessing (see
