@@ -77,7 +77,14 @@ export const config = {
       gates: buildGates("FRONTEND", "yarn test"),
       gitlabProjectPath: process.env.FRONTEND_GITLAB_PROJECT ?? "saqr/front-ai",
       acceptanceRunner: process.env.FRONTEND_ACCEPTANCE_RUNNER ?? "npx vitest run",
-      acceptanceTestExt: process.env.FRONTEND_ACCEPTANCE_TEST_EXT ?? "test.ts",
+      // Reproduced live (XEN-539): a React-component acceptance test needs real JSX
+      // (`render(<Modal .../>)`), and tsc only parses JSX in a .tsx file — a `.test.ts`
+      // acceptance test with JSX in it fails tsc with a cascade of unrelated-looking
+      // syntax errors ("'>' expected", "Unterminated regular expression literal"),
+      // not a clear "wrong extension" message. vitest's own `include` picks up both
+      // .test.ts and .test.tsx (see .env.example), so this was silently wrong for
+      // every frontend task whose acceptance test needs to render a component.
+      acceptanceTestExt: process.env.FRONTEND_ACCEPTANCE_TEST_EXT ?? "test.tsx",
     },
   } satisfies Record<string, RepoConfig>,
   // No role here used an explicit --model before — every turn silently inherited
