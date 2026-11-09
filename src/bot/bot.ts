@@ -94,7 +94,7 @@ function describeOutcome(outcome: QueueRunOutcome | { kind: "error"; message: st
 // message is rejected outright. Jira text routinely contains most of these (code in
 // backticks, parenthesized asides, "a.b.c" paths, "foo-bar" identifiers), so this has to
 // run over every piece of dynamic text before it goes anywhere near our own `*`/`>`/`||`.
-function escapeMarkdownV2(text: string): string {
+export function escapeMarkdownV2(text: string): string {
   return text.replace(/[_*[\]()~`>#+\-=|{}.!\\]/g, (ch) => `\\${ch}`);
 }
 
@@ -111,13 +111,20 @@ function expandableBlockquote(lines: string[]): string {
 // tap-to-expand block instead of dumping both inline every time.
 function formatCostEstimate(estimate: Proposal["costEstimate"]): string {
   if (!estimate) return "📊 оценка: недостаточно истории для прогноза";
-  const cost = `~$${escapeMarkdownV2(estimate.medianCostUsd.toFixed(2))}`;
+  // The leading "~" here is a literal approx sign, not MarkdownV2 syntax — but it's
+  // also MarkdownV2's strikethrough delimiter, so an unescaped one left Telegram
+  // waiting for a closing "~" that never came and rejected the whole message
+  // ("can't find end of Strikethrough entity"). Must be escaped outside
+  // escapeMarkdownV2's call (that only covers the cost/duration number themselves).
+  const cost = `\\~$${escapeMarkdownV2(estimate.medianCostUsd.toFixed(2))}`;
   const duration =
-    estimate.medianDurationMs !== null ? `, ~${escapeMarkdownV2(Math.round(estimate.medianDurationMs / 60_000).toString())} мин` : "";
-  return `📊 по истории (${estimate.sampleSize} задач): обычно ${cost}${duration}`;
+    estimate.medianDurationMs !== null
+      ? `, \\~${escapeMarkdownV2(Math.round(estimate.medianDurationMs / 60_000).toString())} мин`
+      : "";
+  return `📊 по истории \\(${estimate.sampleSize} задач\\): обычно ${cost}${duration}`;
 }
 
-function formatProposal(p: Proposal): string {
+export function formatProposal(p: Proposal): string {
   const header = [
     "Смотрю задачу — вот что предлагаю:",
     "",
@@ -135,7 +142,7 @@ function formatProposal(p: Proposal): string {
   const criteriaLines =
     p.acceptanceCriteria.length > 0
       ? p.acceptanceCriteria.map((c) => `• ${escapeMarkdownV2(c)}`)
-      : ["(модель не сформулировала критерии — будет зафиксирован только план)"];
+      : ["\\(модель не сформулировала критерии — будет зафиксирован только план\\)"];
 
   const bodyLines = [
     "📋 Описание:",
@@ -144,7 +151,7 @@ function formatProposal(p: Proposal): string {
     "💡 Предлагаемое решение:",
     ...escapeMarkdownV2(p.plan || "(нет плана)").split("\n"),
     "",
-    "✅ Критерии приёмки (зафиксируются при подтверждении):",
+    "✅ Критерии приёмки \\(зафиксируются при подтверждении\\):",
     ...criteriaLines,
   ];
 
