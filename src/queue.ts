@@ -629,7 +629,16 @@ export function buildFailureReason(result: CloseLoopResult): string {
 // task need different comments/transitions around this same core step (one comment
 // immediately vs. one combined comment only once both halves are known), so folding
 // them in here would just mean every caller immediately undoing half of them.
-async function closeLoopAndPush(
+//
+// Exported (2026-11-10) for manual resume-with-a-custom-prompt intervention: reproduced
+// live (XEN-540) that continueNeedsHuman's own buildContinuationPrompt — "here's the
+// whole diff, re-review it against every criterion" — can burn an entire fresh
+// session's context budget on broad re-verification without ever reaching a single
+// edit, repeatedly, when what's actually needed is "here's the one concrete gate
+// failure, fix just that." continueNeedsHuman itself still always uses the generic
+// prompt (right for the common case); this export is the deliberate escape hatch for
+// when it isn't working.
+export async function closeLoopAndPush(
   issue: { key: string; summary: string },
   repo: RepoHandle,
   task: TaskSpec,
@@ -752,8 +761,9 @@ async function runJob(
 
 // Shared by runJob's first attempt and resolveBrief's resumed attempt — a resumed
 // session can succeed, fail, or raise ANOTHER brief, and all three need exactly the
-// same handling a first attempt would get.
-async function handleCloseLoopOutcome(
+// same handling a first attempt would get. Exported alongside closeLoopAndPush above,
+// same reason.
+export async function handleCloseLoopOutcome(
   jira: JiraClient,
   issue: { key: string; summary: string },
   repo: RepoHandle,
