@@ -421,6 +421,20 @@ export async function startBot(): Promise<void> {
       await ctx.answerCallbackQuery({ text: "Сейчас уже выполняется другая задача.", show_alert: true });
       return;
     }
+    // Reproduced live (2026-11-10): without this check, picking while an earlier pick's
+    // analysis is still in flight fell through to the "Анализирую…" placeholder below,
+    // which then got edited into a generic "не удалось начать" once proposeIssueByKey's
+    // own busy guard caught it — reading as a failure worth retrying, not "already
+    // running, just wait". Checking `analyzing` here answers immediately, by name,
+    // before that placeholder ever shows.
+    const alreadyAnalyzing = getLiveState().analyzing;
+    if (alreadyAnalyzing && alreadyAnalyzing !== "searching") {
+      await ctx.answerCallbackQuery({
+        text: `${alreadyAnalyzing} уже анализируется — подожди, это недолго.`,
+        show_alert: true,
+      });
+      return;
+    }
     await ctx.answerCallbackQuery({ text: "Анализирую…" });
 
     // Reproduced live: a multi-minute silent gap while Claude reads a real codebase
@@ -448,11 +462,15 @@ export async function startBot(): Promise<void> {
           .editMessageText(ctx.chat!.id, msg.message_id, `⏸ Пауза: ${outcome.reason}`)
           .catch(() => ctx.reply(`⏸ Пауза: ${outcome.reason}`));
       } else {
-        // awaiting_approval / busy: a race with another chat action between the
-        // guards above and the actual propose call.
-        await ctx.api
-          .editMessageText(ctx.chat!.id, msg.message_id, "Не удалось начать — попробуй ещё раз через /start.")
-          .catch(() => {});
+        // awaiting_approval / busy: a narrow residual race between the guards above
+        // and proposeIssueByKey's own internal check (there's an `await` in between —
+        // answerCallbackQuery — so it's not fully closed). Name what's actually busy
+        // when we know it, instead of a generic "failed, try again".
+        const busyText =
+          outcome.kind === "busy" && outcome.busyWith
+            ? `${outcome.busyWith} уже обрабатывается — подожди, это недолго.`
+            : "Уже занято другой задачей — подожди, это недолго.";
+        await ctx.api.editMessageText(ctx.chat!.id, msg.message_id, busyText).catch(() => {});
       }
     } catch (err) {
       await ctx.api

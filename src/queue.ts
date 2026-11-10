@@ -99,7 +99,12 @@ export type ProposeOutcome =
   | { kind: "empty" }
   | { kind: "paused"; reason: string }
   | { kind: "awaiting_approval" }
-  | { kind: "busy" }
+  // busyWith names whichever ticket is actually responsible, when known — reproduced
+  // live (2026-11-10): a generic "занято" after the double-propose-race fix read as a
+  // failure worth retrying, so the user re-clicked /start several times while their own
+  // first pick's analysis was still genuinely in flight. Naming the ticket + "это
+  // недолго" turns that into "ok, I'll wait" instead.
+  | { kind: "busy"; busyWith?: string }
   | { kind: "skipped"; issueKey: string; reason: string }
   | { kind: "proposed"; proposal: Proposal };
 
@@ -361,11 +366,25 @@ function hasUnresolvedWork(): boolean {
   return Boolean(live.currentJob || live.analyzing || live.pendingApproval || live.pendingHumanReview || live.pendingBrief);
 }
 
+// Best-effort "what's actually busy" for the `busy` outcome's message — "searching" is
+// proposeNext's own placeholder before it's picked a concrete ticket off the queue, so
+// it's deliberately not surfaced (nothing useful to name yet). Exported for its own unit
+// test — the rest of this file's propose/dispatch functions are integration-shaped
+// (real Jira/git/claude calls), too heavy to unit test directly, but this one is pure.
+export function whatsBusy(): string | undefined {
+  const live = getLiveState();
+  if (live.currentJob) return live.currentJob.issueKey;
+  if (live.analyzing && live.analyzing !== "searching") return live.analyzing;
+  if (live.pendingHumanReview) return live.pendingHumanReview.issueKey;
+  if (live.pendingBrief) return live.pendingBrief.issueKey;
+  return undefined;
+}
+
 export async function proposeNext(onAnalyzing?: (issueKey: string) => void | Promise<void>): Promise<ProposeOutcome> {
   const paused = checkDailyCaps();
   if (paused) return paused;
   if (getLiveState().pendingApproval) return { kind: "awaiting_approval" };
-  if (hasUnresolvedWork()) return { kind: "busy" };
+  if (hasUnresolvedWork()) return { kind: "busy", busyWith: whatsBusy() };
 
   // Claimed synchronously, right here — no `await` between the check above and this —
   // so a second concurrent call can't pass the same check before this one's analysis
@@ -393,7 +412,7 @@ export async function proposeIssueByKey(
   const paused = checkDailyCaps();
   if (paused) return paused;
   if (getLiveState().pendingApproval) return { kind: "awaiting_approval" };
-  if (hasUnresolvedWork()) return { kind: "busy" };
+  if (hasUnresolvedWork()) return { kind: "busy", busyWith: whatsBusy() };
 
   setAnalyzing(issueKey);
   try {
