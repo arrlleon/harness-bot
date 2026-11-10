@@ -62,6 +62,39 @@ test("parseGateIntegrityViolations ignores a pre-existing skip marker shown only
   assert.deepEqual(parseGateIntegrityViolations(diff), []);
 });
 
+// Reproduced live (2026-11-10): the acceptance-test-writer role is explicitly told to
+// use test.skip(...) for a criterion that genuinely isn't automatable (e.g. "tsc/build
+// pass") — close to every task's acceptance criteria include one, so this used to flag
+// on sanctioned, expected content, not a real attempt to weaken a gate.
+test("parseGateIntegrityViolations ignores test.skip inside the known acceptance test path", () => {
+  const diff = [
+    "diff --git a/src/__acceptance__/xen-539.test.tsx b/src/__acceptance__/xen-539.test.tsx",
+    "new file mode 100644",
+    "--- /dev/null",
+    "+++ b/src/__acceptance__/xen-539.test.tsx",
+    "@@ -0,0 +1,2 @@",
+    "+test.skip('AC4: tsc --noEmit and yarn build pass', () => {})",
+  ].join("\n");
+  assert.deepEqual(parseGateIntegrityViolations(diff, "src/__acceptance__/xen-539.test.tsx"), []);
+});
+
+// The exemption is scoped to exactly that one known path, not test files in general —
+// implement skip-marking some OTHER, pre-existing test file still flags exactly as
+// before, acceptanceTestPath argument or not.
+test("parseGateIntegrityViolations still flags test.skip added to a DIFFERENT test file than the acceptance test", () => {
+  const diff = [
+    "diff --git a/src/users/users.service.test.ts b/src/users/users.service.test.ts",
+    "--- a/src/users/users.service.test.ts",
+    "+++ b/src/users/users.service.test.ts",
+    "@@ -1,3 +1,3 @@",
+    "-it('finds a user by id', () => {})",
+    "+it.skip('finds a user by id', () => {})",
+  ].join("\n");
+  const violations = parseGateIntegrityViolations(diff, "src/__acceptance__/xen-539.test.tsx");
+  assert.equal(violations.length, 1);
+  assert.match(violations[0].description, /skip\/only\/todo/);
+});
+
 test("parseGateIntegrityViolations flags any touch to CI config", () => {
   const diff = [
     "diff --git a/.gitlab-ci.yml b/.gitlab-ci.yml",

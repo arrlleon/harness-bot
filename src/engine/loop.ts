@@ -82,7 +82,7 @@ async function runPostImplementSuccess(
       costUsd: totalCostUsd,
       summary: "Проверяю целостность гейтов",
     });
-    const violations = await checkGateIntegrity(worktreeDir, config.gateIntegrityCheck.baseBranch);
+    const violations = await checkGateIntegrity(worktreeDir, config.gateIntegrityCheck.baseBranch, acceptanceTestPath);
     if (violations.length > 0) {
       return {
         task,

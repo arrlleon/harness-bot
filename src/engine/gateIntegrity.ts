@@ -17,9 +17,18 @@ const GATE_SCRIPT_KEY = /"(test|lint|build|typecheck)"\s*:/;
 const TEST_FILE_GLOB = /(\.(test|spec)\.[jt]sx?$)|(^|\/)__tests__\//;
 const SKIP_MARKER = /\.(skip|todo)\(|x(describe|it|test)\(/;
 
-// Pure, directly testable — checkGateIntegrity below is just this plus the I/O to get
-// the diff in the first place.
-export function parseGateIntegrityViolations(diff: string): GateIntegrityViolation[] {
+// The acceptance-test-writer role is explicitly told to use test.skip(...) for a
+// criterion that genuinely isn't automatable (buildAcceptanceTestPrompt, engine/
+// acceptanceTest.ts: "если критерий технически не проверяем автоматическим тестом,
+// напиши test.skip(...) с комментарием почему") — a frozen, human-approved contract
+// the implement role can't even edit (its own path is in extraDeniedPaths). Reproduced
+// live (2026-11-10): every task whose acceptance criteria include a plain "tsc/build
+// passes" item (close to all of them) got this exact test.skip() by design, and used to
+// get flagged as if implement had weakened a test — gate_integrity_violation fired on
+// sanctioned, expected content, not a real attempt to cheat a gate. Only this one known
+// path is exempt; test.skip/todo added anywhere else (an EXISTING test file implement
+// touched, say) still flags exactly as before.
+export function parseGateIntegrityViolations(diff: string, acceptanceTestPath?: string): GateIntegrityViolation[] {
   if (!diff) return [];
 
   const violations: GateIntegrityViolation[] = [];
@@ -62,7 +71,7 @@ export function parseGateIntegrityViolations(diff: string): GateIntegrityViolati
           violations.push({ description: `изменён скрипт "${scriptMatch[1]}" в ${currentFile}` });
         }
       }
-    } else if (TEST_FILE_GLOB.test(currentFile) && SKIP_MARKER.test(line)) {
+    } else if (TEST_FILE_GLOB.test(currentFile) && currentFile !== acceptanceTestPath && SKIP_MARKER.test(line)) {
       if (!flaggedSkipFiles.has(currentFile)) {
         flaggedSkipFiles.add(currentFile);
         violations.push({ description: `добавлен skip/only/todo в тест: ${currentFile}` });
@@ -78,7 +87,7 @@ export function parseGateIntegrityViolations(diff: string): GateIntegrityViolati
 // count genuinely drops, "no worse than before" is technically true, and nothing was
 // actually fixed). This catches exactly that class, plus the agent editing the judge
 // itself (CI config, gate commands) to make failures disappear.
-export async function checkGateIntegrity(worktreeDir: string, baseBranch: string): Promise<GateIntegrityViolation[]> {
+export async function checkGateIntegrity(worktreeDir: string, baseBranch: string, acceptanceTestPath?: string): Promise<GateIntegrityViolation[]> {
   const diff = await getWorktreeDiff(worktreeDir, baseBranch).catch(() => "");
-  return parseGateIntegrityViolations(diff);
+  return parseGateIntegrityViolations(diff, acceptanceTestPath);
 }

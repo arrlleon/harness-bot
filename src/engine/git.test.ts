@@ -236,6 +236,74 @@ test("getWorktreeDiff including untracked files doesn't change what commitAll la
   }
 });
 
+// Reproduced live (2026-11-10): gate-integrity's diff against the bare branch name
+// "dev" showed an entirely different, already-merged ticket's file as if THIS task had
+// just added it — because the main checkout's local "dev" was stale (nothing but a
+// fresh task's own createWorktree/rebase ever updates it), and a bare branch name
+// resolves to that stale local ref, not what the worktree actually forked from.
+test("getWorktreeDiff isn't fooled by a stale local branch ref — diffs from origin, not local", async () => {
+  const { origin, local } = await makeRepoWithRemote();
+  const branch = uniqueBranch();
+  try {
+    const dir = await createWorktree(local, branch);
+    await writeFile(join(dir, "own-change.txt"), "this task's own work\n");
+
+    // Someone else's merge lands on origin/dev AFTER this worktree forked — `local`'s
+    // own "dev" branch is never told about it (nothing here ever pulls `local`).
+    await pushDirectlyToOrigin(origin, "unrelated change pushed straight to origin\n");
+
+    const diff = await getWorktreeDiff(dir, "dev");
+    assert.match(diff, /own-change\.txt/);
+    assert.doesNotMatch(diff, /unrelated change pushed straight to origin/);
+  } finally {
+    await cleanup(local, branch);
+    await rm(origin, { recursive: true, force: true });
+  }
+});
+
+// Same root cause, the other direction: a long-lived worktree's task can still be in
+// progress when OTHER people's work merges into origin/dev — a live diff against
+// "origin/dev right now" would pick all of that up as noise too (reproduced the same
+// day: an entirely unrelated feature's full diff, nothing to do with the task at hand).
+// merge-base pins to where this worktree's own history actually forked, regardless of
+// how far origin has moved since.
+test("getWorktreeDiff isn't fooled by origin moving on after the worktree forked", async () => {
+  const { origin, local } = await makeRepoWithRemote();
+  const branch = uniqueBranch();
+  try {
+    const dir = await createWorktree(local, branch);
+    await writeFile(join(dir, "own-change.txt"), "this task's own work\n");
+
+    // Lands on origin/dev well after this worktree's own fork point.
+    await pushDirectlyToOrigin(origin, "a different, later feature merged to dev\n");
+
+    const diff = await getWorktreeDiff(dir, "dev");
+    assert.match(diff, /own-change\.txt/);
+    assert.doesNotMatch(diff, /a different, later feature merged to dev/);
+  } finally {
+    await cleanup(local, branch);
+    await rm(origin, { recursive: true, force: true });
+  }
+});
+
+// The fallback every OTHER getWorktreeDiff test above already exercises implicitly
+// (makeRepo()'s throwaway repos have no "origin" remote at all) — made explicit here
+// so it reads as an intentional decision, not just an accident of the test fixtures:
+// a repo with no remote degrades to the plain old behavior rather than failing outright.
+test("getWorktreeDiff falls back to a plain branch diff when there's no origin remote at all", async () => {
+  const repo = await makeRepo();
+  const branch = uniqueBranch();
+  try {
+    const dir = await createWorktree(repo, branch);
+    await writeFile(join(dir, "README.md"), "initial\nchanged\n");
+
+    const diff = await getWorktreeDiff(dir, "main").catch(() => getWorktreeDiff(dir, "master"));
+    assert.match(diff, /\+changed/);
+  } finally {
+    await cleanup(repo, branch);
+  }
+});
+
 test("createWorktree accepts a startPoint and checks out that historical commit, not HEAD", async () => {
   const repo = await makeRepo();
   const branch = uniqueBranch();

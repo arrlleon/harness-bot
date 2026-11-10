@@ -136,6 +136,33 @@ export async function commitAll(worktreeDir: string, message: string): Promise<b
 // the branch point covers both the same way, so the human reviewing it sees the real
 // change regardless of which failure path got them here.
 //
+// `baseBranch` alone (e.g. "dev") resolves to whatever the LOCAL branch ref happens to
+// be in this repo right now — not what the worktree actually forked from, and not
+// necessarily fresh: nothing besides a brand-new task's own createWorktree/
+// rebaseOntoFreshBase ever updates it, so on a repo whose main checkout hasn't been
+// pulled in a while it can be one or more merges behind. Reproduced live (2026-11-10):
+// gate-integrity's diff against "dev" showed an entirely different, already-merged
+// ticket's acceptance test as if THIS task had just added it, purely because the local
+// "dev" ref predated that merge. `origin/<baseBranch>` alone fixes staleness but trades
+// it for the opposite problem on a long-lived worktree: it keeps moving forward with
+// OTHER people's merges while this task's own work sits still, so a live diff against
+// "origin/dev right now" picks up all of that as noise too (reproduced the same day:
+// an entirely unrelated feature's full diff, nothing to do with this task). The
+// merge-base of HEAD and origin/<baseBranch> is the one fixed point that's neither —
+// exactly where this worktree's own history forked, regardless of how stale the local
+// ref is or how far origin has since moved on. Falls back to the plain branch name if
+// there's no such remote at all (this project's own test repos have none) rather than
+// hard-failing the whole diff over it.
+async function resolveDiffBase(worktreeDir: string, baseBranch: string): Promise<string> {
+  try {
+    await execFileAsync("git", ["fetch", "origin", baseBranch], { cwd: worktreeDir });
+    const { stdout } = await execFileAsync("git", ["merge-base", "HEAD", `origin/${baseBranch}`], { cwd: worktreeDir });
+    return stdout.trim();
+  } catch {
+    return baseBranch;
+  }
+}
+
 // `git add -N .` (intent-to-add) first: a plain `git diff <base>` is blind to brand-new
 // untracked files — reproduced live (XEN-427): the agent's actual new controller/module
 // files were completely absent from the reviewed diff, which showed only the files it
@@ -144,7 +171,8 @@ export async function commitAll(worktreeDir: string, message: string): Promise<b
 // it doesn't change what a later `commitAll`'s own `git add -A` actually commits.
 export async function getWorktreeDiff(worktreeDir: string, baseBranch: string): Promise<string> {
   await execFileAsync("git", ["add", "-N", "."], { cwd: worktreeDir });
-  const { stdout } = await execFileAsync("git", ["diff", baseBranch], { cwd: worktreeDir, maxBuffer: 1024 * 1024 * 10 });
+  const base = await resolveDiffBase(worktreeDir, baseBranch);
+  const { stdout } = await execFileAsync("git", ["diff", base], { cwd: worktreeDir, maxBuffer: 1024 * 1024 * 10 });
   return stdout;
 }
 
