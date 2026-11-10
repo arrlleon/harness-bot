@@ -30,9 +30,9 @@ export function average(values: number[]): number {
 // Separated from runCaseKTimes below so this math is testable without actually running
 // an eval case (real git worktrees + a real `claude` turn).
 //
-// Found, not yet fixed, in an earlier audit: an empty `attempts` array (k=0, a negative
-// k, or NaN from a bad `--k` CLI value all reduce to this, since runCaseKTimes's loop
-// just never runs) silently reported a false PASS — average([]) is NaN, and
+// Found in an earlier audit, fixed here: an empty `attempts` array (k=0, a negative k,
+// or NaN from a bad `--k` CLI value all reduce to this, since runCaseKTimes's loop just
+// never runs) used to silently report a false PASS — average([]) is NaN, and
 // [].every(...) is vacuously true, so a case that never ran at all looked identical to
 // one that passed every attempt. Throwing here, rather than degrading quietly, is the
 // same reasoning as cli.ts's own k validation below: zero evidence must never render as
