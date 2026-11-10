@@ -14,6 +14,7 @@ import {
   finishJob,
   appendLog,
   getLiveState,
+  setAnalyzing,
   setPendingApproval,
   clearPendingApproval,
   setPendingHumanReview,
@@ -343,14 +344,21 @@ async function proposeIssue(
 }
 
 // Shared by proposeNext/proposeIssueByKey/dispatchIssue — a task shouldn't start while
-// ANY of the three pending states (approval, human-review, brief) is unresolved, not
-// just while something is actively executing (currentJob). Reproduced live as a real
-// gap: pendingBrief specifically was never checked anywhere, so starting a second
-// ticket while a brief sat paused on the first one was one click away — worse once
-// proposeNext runs on its own poll timer instead of only a manual /start click.
+// ANY of the four pending states (analysis in flight, approval, human-review, brief) is
+// unresolved, not just while something is actively executing (currentJob). Reproduced
+// live as two real gaps on two separate occasions:
+// - pendingBrief specifically was never checked anywhere, so starting a second ticket
+//   while a brief sat paused on the first one was one click away.
+// - `analyzing` itself didn't exist at all until reproduced live (2026-11-10): a manual
+//   dashboard pick and the auto-poll both passed this exact check — at the time, only
+//   currentJob/pendingApproval/pendingHumanReview/pendingBrief, none of which exist
+//   during the several-second analysis turn itself — and both ran a full, paid analysis
+//   before either's setPendingApproval call finally landed. See LiveState.analyzing's
+//   own comment for why a boolean set only around the final step isn't enough; it has
+//   to cover proposeNext/proposeIssueByKey's ENTIRE body, Jira fetch included.
 function hasUnresolvedWork(): boolean {
   const live = getLiveState();
-  return Boolean(live.currentJob || live.pendingApproval || live.pendingHumanReview || live.pendingBrief);
+  return Boolean(live.currentJob || live.analyzing || live.pendingApproval || live.pendingHumanReview || live.pendingBrief);
 }
 
 export async function proposeNext(onAnalyzing?: (issueKey: string) => void | Promise<void>): Promise<ProposeOutcome> {
@@ -359,12 +367,21 @@ export async function proposeNext(onAnalyzing?: (issueKey: string) => void | Pro
   if (getLiveState().pendingApproval) return { kind: "awaiting_approval" };
   if (hasUnresolvedWork()) return { kind: "busy" };
 
-  const jira = new JiraClient(config.jira.baseUrl, config.jira.token);
-  const issues = await jira.searchIssues(QUEUE_JQL());
-  const issue = issues.find((i) => !declinedKeys.has(i.key));
-  if (!issue) return { kind: "empty" };
+  // Claimed synchronously, right here — no `await` between the check above and this —
+  // so a second concurrent call can't pass the same check before this one's analysis
+  // even starts. Cleared in `finally` no matter how this ends.
+  setAnalyzing("searching");
+  try {
+    const jira = new JiraClient(config.jira.baseUrl, config.jira.token);
+    const issues = await jira.searchIssues(QUEUE_JQL());
+    const issue = issues.find((i) => !declinedKeys.has(i.key));
+    if (!issue) return { kind: "empty" };
 
-  return proposeIssue(jira, issue, onAnalyzing);
+    setAnalyzing(issue.key);
+    return await proposeIssue(jira, issue, onAnalyzing);
+  } finally {
+    setAnalyzing(null);
+  }
 }
 
 // Manually picked from /start's ticket menu — same guards as proposeNext, just
@@ -378,9 +395,14 @@ export async function proposeIssueByKey(
   if (getLiveState().pendingApproval) return { kind: "awaiting_approval" };
   if (hasUnresolvedWork()) return { kind: "busy" };
 
-  const jira = new JiraClient(config.jira.baseUrl, config.jira.token);
-  const issue = await jira.getIssue(issueKey);
-  return proposeIssue(jira, issue, onAnalyzing);
+  setAnalyzing(issueKey);
+  try {
+    const jira = new JiraClient(config.jira.baseUrl, config.jira.token);
+    const issue = await jira.getIssue(issueKey);
+    return await proposeIssue(jira, issue, onAnalyzing);
+  } finally {
+    setAnalyzing(null);
+  }
 }
 
 // Dispatches whatever's currently pending approval. Returns null if nothing

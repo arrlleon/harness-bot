@@ -105,6 +105,15 @@ export interface PendingBrief {
 export interface LiveState {
   botRunning: boolean;
   currentJob: LiveJob | null;
+  // Set the instant a propose call clears its "is anything else going on" guard, well
+  // before setPendingApproval — closes a real race (reproduced live, 2026-11-10): the
+  // guard alone only checks pendingApproval/currentJob/etc, none of which exist yet
+  // during the several-second analysis turn itself, so a second propose call (a
+  // dashboard pick and the auto-poll, in the case that happened) can pass the SAME
+  // guard before either has set anything, and both run a full (paid) analysis. Not
+  // persisted, same reasoning as currentJob: it tracks a live in-memory turn, and a
+  // restart kills that regardless — there's nothing to resume.
+  analyzing: string | null;
   pendingApproval: PendingApproval | null;
   pendingHumanReview: PendingHumanReview | null;
   pendingBrief: PendingBrief | null;
@@ -113,6 +122,7 @@ export interface LiveState {
 const state: LiveState = {
   botRunning: false,
   currentJob: null,
+  analyzing: null,
   pendingApproval: null,
   pendingHumanReview: null,
   pendingBrief: null,
@@ -196,6 +206,10 @@ export function getLiveState(): LiveState {
 
 export function setBotRunning(running: boolean): void {
   state.botRunning = running;
+}
+
+export function setAnalyzing(issueKey: string | null): void {
+  state.analyzing = issueKey;
 }
 
 export function startJob(issueKey: string, title: string, description: string, repo: string, maxIterations: number): void {
