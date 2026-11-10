@@ -19,17 +19,20 @@
 # regression in an unrelated, untouched directory won't be caught here) — an accepted,
 # explicit tradeoff for the speed, not an oversight.
 #
-# Quarantine (.jest-quarantine) exclusion was tried here too (CI excludes the same ~20
-# known-broken suites) and DROPPED: reproduced live — passing a `--testPathIgnorePatterns`
-# value with ~20 pipe-joined alternations via the jest CLI silently breaks the
-# positional directory scoping entirely (jest then runs close to the FULL suite instead
-# of just the scoped directories) — reproduced even with fake, harmless alternations of
-# the same shape, so it's the pattern COUNT/length via CLI, not the real quarantine
-# content. A real jest/yargs CLI parsing quirk in this version, not specific to this
-# script. Not worth fighting for a minor nice-to-have when it silently defeats the
-# actual point of this script — if a scoped run ever sweeps in one of the ~20
-# quarantined suites, that's a rare, visible, investigable false-positive, not a
-# systemic problem.
+# Quarantine (.jest-quarantine) exclusion, and later unit-vs-integration filtering,
+# were both tried via `--testPathIgnorePatterns` (CI excludes quarantine the same way)
+# and DROPPED: reproduced live — ANY value passed to `--testPathIgnorePatterns` via the
+# jest CLI silently breaks positional scoping entirely (jest then runs close to the
+# FULL suite instead of just the scoped set) — reproduced with the real ~20-pattern
+# quarantine string, a single fake pattern, and a single real one; it's the flag itself
+# in this jest/yargs version's CLI parsing, not pattern count or content. Worked around
+# below by enumerating the actual files to run ourselves (find, with its own
+# exclusions) instead of handing jest a directory + an ignore list.
+#
+# "Only unit tests" (2026-11-10, explicit user request): excludes this project's own
+# *.integration.spec.ts naming convention (real DB/infra-backed tests — e.g. the
+# `.pg.integration.spec.ts` suffix) from the scoped set. Narrower still than the
+# directory-scoping tradeoff already accepted above.
 #
 # This gate is configured `strict: true` (BACKEND_TEST_STRICT=true in .env): a
 # diff-scoped baseline is always vacuously empty (nothing's changed yet at baseline
@@ -56,12 +59,24 @@ if [ -z "$BASE" ]; then
 fi
 
 DIRS="$(git diff --name-only --diff-filter=ACMR "$BASE" -- '*.ts' \
-  | sed -E 's#^src/##; s#/[^/]+$##' | sort -u | tr '\n' ' ')"
+  | sed -E 's#^src/##; s#/[^/]+$##' | sort -u)"
 
 if [ -z "$DIRS" ]; then
   echo "[scoped-test] nothing changed yet relative to $BASE — nothing to test"
   exit 0
 fi
 
-echo "[scoped-test] scoping to directories: $DIRS"
-exec yarn jest --ci --bail=5 --maxWorkers=75% $DIRS
+FILES=""
+for dir in $DIRS; do
+  FILES="$FILES
+$(find "src/$dir" -name '*.spec.ts' ! -name '*.integration.spec.ts' 2>/dev/null)"
+done
+FILES="$(echo "$FILES" | grep -v '^$' | sort -u | tr '\n' ' ')"
+
+if [ -z "$FILES" ]; then
+  echo "[scoped-test] no unit test files found under: $(echo "$DIRS" | tr '\n' ' ')"
+  exit 0
+fi
+
+echo "[scoped-test] scoping to unit tests: $FILES"
+exec yarn jest --ci --bail=5 --maxWorkers=75% $FILES
