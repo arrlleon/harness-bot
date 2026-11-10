@@ -238,7 +238,30 @@ async function runPostImplementSuccess(
 
       if (fixTurn.isError) {
         iterations.push({ turn: fixTurn, verify: { passed: false, output: fixTurn.resultText, gates: [] } });
-        return { task, success: false, iterations, totalCostUsd, stopReason: "agent_error", worktreeDir, acceptanceTestPath };
+        // Same reasoning and shape as the brief_pending resumeState a few lines up
+        // (reviewResume included — resuming needs to land back in THIS review round,
+        // not fall through to the main loop's own baseline-compare cycle) — see the
+        // main loop's own agent_error comment for why `--resume`, not freshSession.
+        return {
+          task,
+          success: false,
+          iterations,
+          totalCostUsd,
+          stopReason: "agent_error",
+          worktreeDir,
+          acceptanceTestPath,
+          resumeState: {
+            sessionId: resumeSessionId,
+            worktreeDir,
+            iteration: iterations.length,
+            totalCostUsd,
+            gates,
+            baselines,
+            extraDeniedPaths,
+            acceptanceTestPath,
+            reviewResume: { round, blocking },
+          },
+        };
       }
 
       const fixVerify = await runGates(worktreeDir, gates, baselines);
@@ -516,7 +539,23 @@ export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promis
 
     if (turn.isError) {
       iterations.push({ turn, verify: { passed: false, output: turn.resultText, gates: [] } });
-      return { task, success: false, iterations, totalCostUsd, stopReason: "agent_error", worktreeDir, acceptanceTestPath };
+      // Resumable like brief_pending just above (same `--resume`, not freshSession —
+      // see CloseLoopResumeState's own comment: nothing here says THIS session's
+      // context was the problem, unlike context_budget). Reproduced live (XEN-540,
+      // XEN-541, both 2026-11-10): agent_error is as often an account-wide session
+      // limit or a per-turn budget cutoff as a real crash — in both cases the paused
+      // turn's own reasoning is exactly what a human clicking "🔄 Продолжить" wants
+      // picked back up, not discarded for a cold restart.
+      return {
+        task,
+        success: false,
+        iterations,
+        totalCostUsd,
+        stopReason: "agent_error",
+        worktreeDir,
+        acceptanceTestPath,
+        resumeState: { sessionId: resumeSessionId, worktreeDir, iteration: i, totalCostUsd, gates, baselines, extraDeniedPaths, acceptanceTestPath, previousFingerprint },
+      };
     }
 
     config.onIteration?.({ iteration: i + 1, phase: "verifying", costUsd: totalCostUsd, summary: turn.resultText.slice(0, 200) });

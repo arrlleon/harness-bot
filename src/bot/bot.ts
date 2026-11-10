@@ -218,14 +218,19 @@ async function sendNeedsHumanReview(
   const keyboard = new InlineKeyboard()
     .text("✅ Принять и запушить", `accept_human:${outcome.issueKey}`)
     .text("❌ Отклонить", `reject_human:${outcome.issueKey}`);
-  // Only ever present for a context_budget stop (single-repo — see queue.ts's two
+  // Present for context_budget and agent_error (single-repo — see queue.ts's two
   // commented-out cross-repo resumeState assignments for why cross-repo doesn't get
-  // this button). A human clicking it is explicitly accepting a known tradeoff — a
-  // fresh session with no memory of what the stopped one already tried — so it's
-  // offered, never assumed; every other needs_human reason has no resumeState and
-  // never shows this third button at all.
-  if (getLiveState().pendingHumanReview?.resumeState) {
-    keyboard.row().text("🔄 Продолжить (новая сессия)", `continue_human:${outcome.issueKey}`);
+  // this button); every other needs_human reason has no resumeState and never shows
+  // this third button at all. The label matters: context_budget's resumeState is
+  // freshSession (that session's own size was the problem — see CloseLoopResumeState's
+  // comment), so clicking it is explicitly accepting a known tradeoff, no memory of
+  // what the stopped session already tried. agent_error instead resumes the exact
+  // same session via --resume (the paused turn's own reasoning, unaffected by whatever
+  // actually caused it — an account limit, a budget cutoff — is exactly what's wanted).
+  const resumeState = getLiveState().pendingHumanReview?.resumeState;
+  if (resumeState) {
+    const label = resumeState.freshSession ? "🔄 Продолжить (новая сессия)" : "🔄 Продолжить";
+    keyboard.row().text(label, `continue_human:${outcome.issueKey}`);
   }
   await send(text, keyboard);
 }

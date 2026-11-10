@@ -75,12 +75,13 @@ export interface PendingHumanReview {
   // need the real task context, not just the title.
   description: string;
   acceptanceCriteria: string[];
-  // Present only when CloseLoopResult.resumeState was set — currently just a
-  // context_budget stop (see that field's own freshSession comment). Its presence is
-  // exactly what gates the "🔄 Продолжить" button in bot.ts: every other needs_human
-  // reason (stuck, review_blocked, gate_integrity_violation, a push/MR failure, ...)
-  // leaves this absent, so continueNeedsHuman (queue.ts) has nothing to resume from and
-  // the button is never shown for those.
+  // Present only when CloseLoopResult.resumeState was set — context_budget (fresh
+  // session, see that field's own freshSession comment) or agent_error (same session,
+  // via --resume). Its presence is exactly what gates the "🔄 Продолжить" button in
+  // bot.ts: every other needs_human reason (stuck, review_blocked,
+  // gate_integrity_violation, a push/MR failure, ...) leaves this absent, so
+  // continueNeedsHuman (queue.ts) has nothing to resume from and the button is never
+  // shown for those.
   resumeState?: CloseLoopResumeState;
 }
 
