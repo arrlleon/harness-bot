@@ -65,3 +65,11 @@ test("aggregateAttempts keeps every attempt's own result, not just the aggregate
   const agg = aggregateAttempts("XEN-364", [a, b]);
   assert.deepEqual(agg.attempts, [a, b]);
 });
+
+// Found in an earlier audit: empty attempts (k=0, a negative k, or NaN from a bad --k
+// all reduce to this) used to report a false PASS — average([]) is NaN, and
+// [].every(...) is vacuously true, so "never ran" looked identical to "passed every
+// attempt". Throws instead of silently rendering a report over zero evidence.
+test("aggregateAttempts throws rather than reporting a false pass over zero attempts", () => {
+  assert.throws(() => aggregateAttempts("XEN-364", []), /no attempts to aggregate/);
+});

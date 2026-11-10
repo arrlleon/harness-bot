@@ -115,23 +115,38 @@ program
 
     const model = opts.model ?? config.models.implement;
     const k = Number(opts.k);
+    // A bad --k (0, negative, non-numeric) used to reach runCaseKTimes's loop, which
+    // just never runs, then aggregateAttempts reported a false PASS over zero real
+    // attempts (average([]) is NaN, [].every(...) is vacuously true) — reproduced in
+    // an earlier audit, not caught by anything until now. Failing fast here, with a
+    // clear message, beats aggregateAttempts's own defensive throw surfacing as an
+    // unhandled rejection deep inside the suite.
+    if (!Number.isInteger(k) || k < 1) {
+      console.error(`[eval] --k must be a positive integer, got ${JSON.stringify(opts.k)}`);
+      process.exit(1);
+    }
     console.log(`[eval] running ${opts.case ? opts.case.join(", ") : "all cases"} with model=${model}, k=${k}...`);
 
-    const { result, savedTo } = await runEvalSuite(opts.case, {
-      repos: config.repos,
-      model,
-      k,
-      maxIterations: config.maxIterations,
-      maxBudgetUsd: config.maxBudgetUsd,
-      onCaseStart: (id) => console.log(`[eval] ${id}: starting...`),
-      onAttemptDone: (id, i, total, r) =>
-        console.log(`[eval] ${id} (${i}/${total}): ${r.passed ? "PASS" : "FAIL"} (${r.stopReason}, $${r.costUsd.toFixed(4)})`),
-      onCaseDone: (agg) => console.log(`[eval] ${agg.caseId}: ${agg.passAtK ? "PASS" : "FAIL"} (pass@1=${agg.passAtOneRate.toFixed(2)})`),
-    });
+    try {
+      const { result, savedTo } = await runEvalSuite(opts.case, {
+        repos: config.repos,
+        model,
+        k,
+        maxIterations: config.maxIterations,
+        maxBudgetUsd: config.maxBudgetUsd,
+        onCaseStart: (id) => console.log(`[eval] ${id}: starting...`),
+        onAttemptDone: (id, i, total, r) =>
+          console.log(`[eval] ${id} (${i}/${total}): ${r.passed ? "PASS" : "FAIL"} (${r.stopReason}, $${r.costUsd.toFixed(4)})`),
+        onCaseDone: (agg) => console.log(`[eval] ${agg.caseId}: ${agg.passAtK ? "PASS" : "FAIL"} (pass@1=${agg.passAtOneRate.toFixed(2)})`),
+      });
 
-    console.log("\n" + formatSuiteReport(result));
-    console.log(`\n[eval] saved to ${savedTo}`);
-    process.exit(result.passAtKCount === result.totalCount ? 0 : 1);
+      console.log("\n" + formatSuiteReport(result));
+      console.log(`\n[eval] saved to ${savedTo}`);
+      process.exit(result.passAtKCount === result.totalCount ? 0 : 1);
+    } catch (err) {
+      console.error(`[eval] failed: ${(err as Error).message}`);
+      process.exit(1);
+    }
   });
 
 program

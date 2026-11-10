@@ -29,7 +29,18 @@ export function average(values: number[]): number {
 // Pure: turns a case's k attempt results into the pass@1/pass^k numbers a report reads.
 // Separated from runCaseKTimes below so this math is testable without actually running
 // an eval case (real git worktrees + a real `claude` turn).
+//
+// Found, not yet fixed, in an earlier audit: an empty `attempts` array (k=0, a negative
+// k, or NaN from a bad `--k` CLI value all reduce to this, since runCaseKTimes's loop
+// just never runs) silently reported a false PASS — average([]) is NaN, and
+// [].every(...) is vacuously true, so a case that never ran at all looked identical to
+// one that passed every attempt. Throwing here, rather than degrading quietly, is the
+// same reasoning as cli.ts's own k validation below: zero evidence must never render as
+// a report.
 export function aggregateAttempts(caseId: string, attempts: EvalCaseResult[]): EvalCaseAggregate {
+  if (attempts.length === 0) {
+    throw new Error(`aggregateAttempts(${caseId}): no attempts to aggregate — refusing to report a false pass over zero runs`);
+  }
   return {
     caseId,
     attempts,
