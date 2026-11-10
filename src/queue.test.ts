@@ -1,7 +1,32 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { splitCrossRepoCriteria, whatsBusy } from "./queue.js";
+import { splitCrossRepoCriteria, whatsBusy, buildFailureReason } from "./queue.js";
 import { setAnalyzing, startJob, finishJob } from "./bot/liveState.js";
+import type { CloseLoopResult, ClaudeTurnResult } from "./types.js";
+
+function turn(partial: Partial<ClaudeTurnResult>): ClaudeTurnResult {
+  return {
+    sessionId: "s1",
+    resultText: "",
+    isError: false,
+    terminalReason: "end_turn",
+    totalCostUsd: 0,
+    usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
+    ...partial,
+  };
+}
+
+function closeLoopResult(partial: Partial<CloseLoopResult>): CloseLoopResult {
+  return {
+    task: { id: "XEN-000", title: "t", description: "d", acceptanceCriteria: [] },
+    success: false,
+    iterations: [],
+    totalCostUsd: 0,
+    stopReason: "max_iterations",
+    worktreeDir: "/tmp/x",
+    ...partial,
+  };
+}
 
 test("splitCrossRepoCriteria routes each criterion back to the repo it was tagged for", () => {
   const { backend, frontend } = splitCrossRepoCriteria([
@@ -52,4 +77,73 @@ test("whatsBusy prefers a running job over a concurrent analysis", () => {
 
 test("whatsBusy returns undefined when nothing is actually busy", () => {
   assert.equal(whatsBusy(), undefined);
+});
+
+// Reproduced live (2026-11-10, XEN-541): "agent_error" alone, with no further detail,
+// left a human with nothing to go on beyond the bare word — every OTHER stopReason
+// here already names its own specifics; this pins that agent_error does too now, and
+// that the others still do.
+test("buildFailureReason names the repeated gate(s) for 'stuck'", () => {
+  const result = closeLoopResult({ stopReason: "stuck", stuckGates: ["test", "build"] });
+  assert.equal(buildFailureReason(result), "stuck (same failure repeated in: test, build)");
+});
+
+test("buildFailureReason names only the blocking findings for 'review_blocked'", () => {
+  const result = closeLoopResult({
+    stopReason: "review_blocked",
+    reviewRounds: 2,
+    reviewFindings: [
+      { description: "race condition in X", blocking: true },
+      { description: "minor style nit", blocking: false },
+    ] as CloseLoopResult["reviewFindings"],
+  });
+  assert.equal(buildFailureReason(result), "review_blocked после 2 раунд(ов) с разработчиком: race condition in X");
+});
+
+test("buildFailureReason lists every gate-integrity violation", () => {
+  const result = closeLoopResult({
+    stopReason: "gate_integrity_violation",
+    gateIntegrityViolations: ["удалён тестовый файл: a.test.ts", "правка CI-конфига: .gitlab-ci.yml"],
+  });
+  assert.equal(
+    buildFailureReason(result),
+    "gate_integrity_violation: удалён тестовый файл: a.test.ts; правка CI-конфига: .gitlab-ci.yml",
+  );
+});
+
+test("buildFailureReason reports the measured token count for 'context_budget'", () => {
+  const result = closeLoopResult({ stopReason: "context_budget", contextTokens: 1873421 });
+  assert.match(buildFailureReason(result), /~1873k tokens/);
+});
+
+test("buildFailureReason includes the raw conflict output for 'rebase_conflict'", () => {
+  const result = closeLoopResult({ stopReason: "rebase_conflict", rebaseConflictOutput: "CONFLICT in src/a.ts" });
+  assert.match(buildFailureReason(result), /CONFLICT in src\/a\.ts/);
+});
+
+test("buildFailureReason surfaces the failing turn's own resultText for 'agent_error'", () => {
+  const result = closeLoopResult({
+    stopReason: "agent_error",
+    iterations: [
+      { turn: turn({ resultText: "ok so far" }), verify: { passed: true, output: "", gates: [] } },
+      { turn: turn({ resultText: "API error: overloaded_error", isError: true }), verify: { passed: false, output: "", gates: [] } },
+    ],
+  });
+  assert.equal(buildFailureReason(result), "agent_error: API error: overloaded_error");
+});
+
+test("buildFailureReason falls back to the bare word when agent_error has nothing to add", () => {
+  const withEmptyText = closeLoopResult({
+    stopReason: "agent_error",
+    iterations: [{ turn: turn({ resultText: "   ", isError: true }), verify: { passed: false, output: "", gates: [] } }],
+  });
+  assert.equal(buildFailureReason(withEmptyText), "agent_error");
+
+  const withNoIterations = closeLoopResult({ stopReason: "agent_error", iterations: [] });
+  assert.equal(buildFailureReason(withNoIterations), "agent_error");
+});
+
+test("buildFailureReason falls back to the bare stopReason for anything with nothing extra to add", () => {
+  assert.equal(buildFailureReason(closeLoopResult({ stopReason: "max_iterations" })), "max_iterations");
+  assert.equal(buildFailureReason(closeLoopResult({ stopReason: "max_budget" })), "max_budget");
 });

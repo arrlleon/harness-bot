@@ -133,3 +133,18 @@ test("strict gate passes once it actually exits 0, regardless of a failing basel
   const result = await runGates(".", fixedGates, baselines);
   assert.equal(result.passed, true);
 });
+
+// A strict gate's baseline is never consulted (both tests above pass regardless of
+// what the baseline command even was) — establishBaselines shouldn't bother running
+// it at all. Matters doubly for a diff-scoped test command (scripts/scoped-test-
+// backend.sh): run at baseline time, before the agent's first edit, it would find
+// nothing changed and do nothing useful anyway.
+test("establishBaselines skips running a strict gate's command at all", async () => {
+  const gates: GateSpec[] = [
+    { name: "test", command: "echo 'Tests: 2 failed' && exit 1" },
+    { name: "acceptance", command: "echo should never run && exit 1", strict: true },
+  ];
+  const baselines = await establishBaselines(".", gates);
+  assert.equal(baselines.length, 1);
+  assert.equal(baselines[0].name, "test");
+});

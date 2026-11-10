@@ -31,7 +31,19 @@ function buildGates(prefix: "BACKEND" | "FRONTEND", defaultTestCommand: string):
   if (typecheck) gates.push({ name: "typecheck", command: typecheck });
   const lint = process.env[`${prefix}_GATE_LINT`];
   if (lint) gates.push({ name: "lint", command: lint });
-  gates.push({ name: "test", command: process.env[`${prefix}_VERIFY_CMD`] ?? defaultTestCommand });
+  // `${prefix}_TEST_STRICT` opts into a diff-scoped test command (see e.g.
+  // scripts/scoped-test-backend.sh, wired via BACKEND_VERIFY_CMD) ignoring its
+  // baseline — XEN-541 (2026-11-10): back-ai's full 1211-file `yarn test` took 45+
+  // minutes, on every iteration. A diff-scoped run's baseline is always vacuously
+  // empty (nothing's changed yet at baseline time), so there's no real "N pre-existing
+  // failures to tolerate" to compare against — same reasoning as the acceptance-test
+  // gate, which is strict for the same reason. Off by default: only meaningful paired
+  // with a command that's actually diff-scoped, not the plain full-suite default.
+  gates.push({
+    name: "test",
+    command: process.env[`${prefix}_VERIFY_CMD`] ?? defaultTestCommand,
+    strict: process.env[`${prefix}_TEST_STRICT`] === "true",
+  });
   const build = process.env[`${prefix}_GATE_BUILD`];
   if (build) gates.push({ name: "build", command: build });
   return gates;

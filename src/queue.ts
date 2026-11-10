@@ -590,6 +590,39 @@ interface CloseLoopAndPushOutcome {
   briefPending?: boolean;
 }
 
+// "stuck", "review_blocked", "gate_integrity_violation", "context_budget",
+// "rebase_conflict" and "agent_error" all have more to say than their own bare word —
+// naming the repeated gate(s), the actual blocking finding(s), the specific tampering
+// caught, the token count, the conflict output, or (agent_error, reproduced live on
+// XEN-541: was the one left out, said nothing beyond the word itself) the failing
+// turn's own resultText. Saves a human from re-deriving any of that from raw gate
+// output, re-running the review turn, or just guessing. Pure and exported for its own
+// test — the rest of closeLoopAndPush is integration-shaped (real git/claude calls).
+export function buildFailureReason(result: CloseLoopResult): string {
+  if (result.stopReason === "stuck" && result.stuckGates?.length) {
+    return `stuck (same failure repeated in: ${result.stuckGates.join(", ")})`;
+  }
+  if (result.stopReason === "review_blocked" && result.reviewFindings?.length) {
+    const blocking = result.reviewFindings.filter((f) => f.blocking);
+    const rounds = result.reviewRounds ? ` после ${result.reviewRounds} раунд(ов) с разработчиком` : "";
+    return `review_blocked${rounds}: ${blocking.map((f) => f.description).join("; ")}`;
+  }
+  if (result.stopReason === "gate_integrity_violation" && result.gateIntegrityViolations?.length) {
+    return `gate_integrity_violation: ${result.gateIntegrityViolations.join("; ")}`;
+  }
+  if (result.stopReason === "context_budget" && result.contextTokens) {
+    return `context_budget: session reached ~${Math.round(result.contextTokens / 1000)}k tokens, stopped before quality degrades further`;
+  }
+  if (result.stopReason === "rebase_conflict" && result.rebaseConflictOutput) {
+    return `rebase_conflict (dev moved on while this was paused, and the two don't merge cleanly): ${result.rebaseConflictOutput.slice(0, 1000)}`;
+  }
+  if (result.stopReason === "agent_error" && result.iterations.length > 0) {
+    const lastTurnText = result.iterations[result.iterations.length - 1].turn.resultText.trim();
+    if (lastTurnText) return `agent_error: ${lastTurnText.slice(0, 1000)}`;
+  }
+  return result.stopReason;
+}
+
 // The actual "do the work" step, shared by the single-repo (runJob) and cross-repo
 // (runCrossRepoJob) dispatch paths. Deliberately does none of the Jira
 // commenting/status-transition side effects — a single-repo task and a cross-repo
@@ -669,25 +702,7 @@ async function closeLoopAndPush(
   }
 
   if (!result.success) {
-    // "stuck", "review_blocked" and "gate_integrity_violation" all have more to say
-    // than the bare stopReason word — naming the repeated gate(s), the actual blocking
-    // finding(s), or the specific tampering caught up front saves a human from
-    // re-deriving that from raw gate output or re-running the review turn.
-    let reason: string = result.stopReason;
-    if (result.stopReason === "stuck" && result.stuckGates?.length) {
-      reason = `stuck (same failure repeated in: ${result.stuckGates.join(", ")})`;
-    } else if (result.stopReason === "review_blocked" && result.reviewFindings?.length) {
-      const blocking = result.reviewFindings.filter((f) => f.blocking);
-      const rounds = result.reviewRounds ? ` после ${result.reviewRounds} раунд(ов) с разработчиком` : "";
-      reason = `review_blocked${rounds}: ${blocking.map((f) => f.description).join("; ")}`;
-    } else if (result.stopReason === "gate_integrity_violation" && result.gateIntegrityViolations?.length) {
-      reason = `gate_integrity_violation: ${result.gateIntegrityViolations.join("; ")}`;
-    } else if (result.stopReason === "context_budget" && result.contextTokens) {
-      reason = `context_budget: session reached ~${Math.round(result.contextTokens / 1000)}k tokens, stopped before quality degrades further`;
-    } else if (result.stopReason === "rebase_conflict" && result.rebaseConflictOutput) {
-      reason = `rebase_conflict (dev moved on while this was paused, and the two don't merge cleanly): ${result.rebaseConflictOutput.slice(0, 1000)}`;
-    }
-    return { closeLoopResult: result, failureReason: reason, failureKind: "loop" };
+    return { closeLoopResult: result, failureReason: buildFailureReason(result), failureKind: "loop" };
   }
 
   if (!config.gitlab.token) {

@@ -54,6 +54,13 @@ function parseFailureCount(gateName: string, output: string): number | null {
 export async function establishBaselines(cwd: string, gates: GateSpec[]): Promise<GateBaseline[]> {
   const baselines: GateBaseline[] = [];
   for (const gate of gates) {
+    // A strict gate (the acceptance test; now optionally the diff-scoped test gate —
+    // see config.ts's `${prefix}_TEST_STRICT`) never consults its baseline at all
+    // (runGates below branches on `gate.strict` before even looking), so running one
+    // here was pure wasted work — for a diff-scoped command specifically, it's also
+    // always vacuous (nothing's changed yet at baseline time, so nothing would be
+    // found to test).
+    if (gate.strict) continue;
     const { exitedZero, output } = await runRaw(cwd, gate.command);
     baselines.push({ name: gate.name, command: gate.command, exitedZero, failureCount: parseFailureCount(gate.name, output) });
   }
