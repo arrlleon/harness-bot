@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildAgentEnv } from "./claudeEngine.js";
+import { buildAgentEnv, pickResultText } from "./claudeEngine.js";
 
 test("buildAgentEnv strips every harness secret, leaving everything else untouched", () => {
   const source = {
@@ -27,4 +27,23 @@ test("buildAgentEnv does not mutate the source object", () => {
 test("buildAgentEnv works on an env with none of the secret keys present", () => {
   const env = buildAgentEnv({ PATH: "/usr/bin" });
   assert.deepEqual(env, { PATH: "/usr/bin" });
+});
+
+// Reproduced live (XEN-540, 2026-11-10): a --max-budget-usd cutoff mid-turn left the
+// CLI's own `result` field empty even though the model had already written a full
+// status report as its last assistant text turn.
+test("pickResultText prefers the CLI's own result when it said something", () => {
+  assert.equal(pickResultText("done, see diff", "ignored fallback"), "done, see diff");
+});
+
+test("pickResultText falls back to the last assistant text when result is empty", () => {
+  assert.equal(pickResultText("", "Бюджет сессии исчерпан, поэтому останавливаюсь"), "Бюджет сессии исчерпан, поэтому останавливаюсь");
+});
+
+test("pickResultText falls back when result is only whitespace", () => {
+  assert.equal(pickResultText("   \n", "последний статус"), "последний статус");
+});
+
+test("pickResultText returns empty when neither has anything to say", () => {
+  assert.equal(pickResultText("", ""), "");
 });

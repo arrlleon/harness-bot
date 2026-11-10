@@ -48,6 +48,18 @@ function truncate(s: string, n: number): string {
   return s.length > n ? s.slice(0, n) + "…" : s;
 }
 
+// Picks what to report as the turn's resultText: the CLI's own `result` field if it
+// said anything, otherwise the last assistant text block. Reproduced live (XEN-540,
+// 2026-11-10): a per-turn `--max-budget-usd` cutoff mid-turn left `result` empty even
+// though the model had already written a full status report as its own last text turn
+// — buildFailureReason's agent_error detail (queue.ts) fell back to the bare word
+// because resultText was empty, not because there was nothing to say. Pure and
+// exported for its own test — the rest of this file needs a real `claude` child
+// process to exercise.
+export function pickResultText(rawResult: string, lastAssistantText: string): string {
+  return rawResult.trim() || lastAssistantText;
+}
+
 function summarizeToolUse(name: string, input: Record<string, unknown>): string {
   const path = (input.file_path as string) ?? (input.path as string);
   switch (name) {
@@ -97,6 +109,13 @@ export async function runClaudeTurn(opts: RunClaudeTurnOptions): Promise<ClaudeT
 
   let resultLine: Record<string, unknown> | null = null;
   let stderrText = "";
+  // Reproduced live (XEN-540, 2026-11-10): a per-turn `--max-budget-usd` cutoff mid-
+  // turn produces a `result` event with `is_error: true` but an EMPTY `result` field,
+  // even though the model had already written a full, useful status report (what's
+  // done, what's not, why) as its own last assistant text — buildFailureReason's
+  // agent_error detail (queue.ts) fell back to the bare word because resultText itself
+  // was empty, not because there was nothing to say.
+  let lastAssistantText = "";
 
   await new Promise<void>((resolve, reject) => {
     const child = spawn("claude", args, { cwd: opts.cwd, env: buildAgentEnv() });
@@ -116,15 +135,15 @@ export async function runClaudeTurn(opts: RunClaudeTurnOptions): Promise<ClaudeT
         resultLine = event;
         return;
       }
-      if (!opts.onLog) return;
 
       if (event.type === "assistant") {
         const content = ((event.message as Record<string, unknown>)?.content ?? []) as Array<Record<string, unknown>>;
         for (const block of content) {
           if (block.type === "tool_use") {
-            opts.onLog(`→ ${summarizeToolUse(String(block.name), (block.input as Record<string, unknown>) ?? {})}`);
+            opts.onLog?.(`→ ${summarizeToolUse(String(block.name), (block.input as Record<string, unknown>) ?? {})}`);
           } else if (block.type === "text" && block.text) {
-            opts.onLog(truncate(String(block.text), 300));
+            lastAssistantText = String(block.text);
+            opts.onLog?.(truncate(String(block.text), 300));
           }
         }
       }
@@ -158,7 +177,7 @@ export async function runClaudeTurn(opts: RunClaudeTurnOptions): Promise<ClaudeT
     // a status message (the real output is file edits, already outside this string),
     // while propose/review/memory/testing-notes/brief feed this straight into a Jira
     // comment, an MR description, or a committed memory file.
-    resultText: scrubSecrets(String(raw.result ?? ""), secretValues()),
+    resultText: scrubSecrets(pickResultText(String(raw.result ?? ""), lastAssistantText), secretValues()),
     isError: Boolean(raw.is_error),
     terminalReason: String(raw.terminal_reason ?? "unknown"),
     totalCostUsd: Number(raw.total_cost_usd ?? 0),
