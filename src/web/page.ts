@@ -162,29 +162,41 @@ async function tick() {
   } else {
     const pct = Math.min(100, Math.round((job.iteration / job.maxIterations) * 100));
     jobCard.innerHTML =
-      '<div><b>' + job.issueKey + '</b>: ' + job.title.replace(/</g, "&lt;") + '</div>' +
+      '<div><b>' + esc(job.issueKey) + '</b>: ' + esc(job.title) + '</div>' +
       '<div class="sub">' + (REPO_RU[job.repo] || job.repo) + ' &middot; прошло ' + fmtElapsed(job.startedAt) + '</div>' +
       '<div class="phase">' + (PHASE_RU[job.phase] || job.phase) + ' (итерация ' + job.iteration + '/' + job.maxIterations + ')</div>' +
       '<div class="bar-bg"><div class="bar-fg" style="width:' + pct + '%"></div></div>' +
       '<div>потрачено: $' + job.costUsd.toFixed(4) + '</div>' +
-      (job.description ? '<details style="margin-top:8px"><summary class="sub">описание тикета</summary><div class="sub" style="white-space:pre-wrap;margin-top:4px">' + job.description.slice(0, 1500).replace(/</g, "&lt;") + '</div></details>' : '') +
+      (job.description ? '<details style="margin-top:8px"><summary class="sub">описание тикета</summary><div class="sub" style="white-space:pre-wrap;margin-top:4px">' + esc(job.description.slice(0, 1500)) + '</div></details>' : '') +
       '<div class="log-panel" id="log-panel"></div>';
     const panel = document.getElementById("log-panel");
-    panel.innerHTML = job.logs.map(function (l) { return '<div>' + l.replace(/</g, "&lt;") + '</div>'; }).join("");
+    panel.innerHTML = job.logs.map(function (l) { return '<div>' + esc(l) + '</div>'; }).join("");
     panel.scrollTop = panel.scrollHeight;
   }
 
   const body = document.getElementById("history-body");
   body.innerHTML = data.history.map(function (r) {
     const detail = r.outcome === "closed"
-      ? '<a href="' + r.detail + '" target="_blank">MR</a>'
-      : r.detail.replace(/</g, "&lt;");
-    return '<tr><td>' + r.issueKey + '</td>' +
+      ? (/^https?:[/][/]/.test(r.detail) ? '<a href="' + esc(r.detail) + '" target="_blank" rel="noopener">MR</a>' : esc(r.detail))
+      : esc(r.detail);
+    return '<tr><td>' + esc(r.issueKey) + '</td>' +
       '<td class="outcome-' + r.outcome + '">' + (OUTCOME_RU[r.outcome] || r.outcome) + '</td>' +
       '<td>' + detail + '</td>' +
       '<td>$' + r.costUsd.toFixed(4) + '</td>' +
       '<td>' + new Date(r.timestamp).toLocaleString("ru-RU") + '</td></tr>';
   }).join("") || '<tr><td colspan="5" class="empty">задач пока нет</td></tr>';
+}
+
+// Every piece of ticket/log/history text goes through this before it touches innerHTML.
+// Only "<" used to be escaped, and issue keys and MR links not at all — fine for an
+// element's text, not for an attribute value.
+function esc(value) {
+  return String(value == null ? "" : value)
+    .split("&").join("&amp;")
+    .split("<").join("&lt;")
+    .split(">").join("&gt;")
+    .split('"').join("&quot;")
+    .split("'").join("&#39;");
 }
 
 async function startTicket(key, btn) {
@@ -222,14 +234,14 @@ async function loadTickets() {
       const tagClass = routable ? "" : " route-" + t.repo;
       return '<div class="ticket-row">' +
         '<div class="ticket-main">' +
-          '<div class="ticket-title"><b>' + t.key + '</b>: ' + t.summary.replace(/</g, "&lt;") + '<span class="repo-tag' + tagClass + '">' + (REPO_RU[t.repo] || t.repo) + '</span></div>' +
-          '<div class="ticket-desc">' + t.description.slice(0, 220).replace(/</g, "&lt;") + '</div>' +
+          '<div class="ticket-title"><b>' + esc(t.key) + '</b>: ' + esc(t.summary) + '<span class="repo-tag' + tagClass + '">' + (REPO_RU[t.repo] || t.repo) + '</span></div>' +
+          '<div class="ticket-desc">' + esc(t.description.slice(0, 220)) + '</div>' +
         '</div>' +
-        '<button class="start-btn" onclick="startTicket(\\'' + t.key + '\\', this)"' + (routable ? '' : ' disabled title="не удаётся определить репозиторий автоматически"') + '>Предложить</button>' +
+        '<button class="start-btn" onclick="startTicket(\\'' + esc(t.key) + '\\', this)"' + (routable ? '' : ' disabled title="не удаётся определить репозиторий автоматически"') + '>Предложить</button>' +
       '</div>';
     }).join("");
   } catch (e) {
-    container.innerHTML = '<div class="empty">не удалось загрузить: ' + e.message + '</div>';
+    container.innerHTML = '<div class="empty">не удалось загрузить: ' + esc(e.message) + '</div>';
   }
 }
 

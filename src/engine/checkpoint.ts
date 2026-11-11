@@ -88,6 +88,10 @@ export function recoverOrphanedCheckpoints(): RecoveredCheckpoint[] {
     ) {
       continue;
     }
+    // One review slot. A second interrupted task used to overwrite the first here
+    // (its checkpoint already deleted) — leave it on disk instead; the bot calls this
+    // again once the current review is resolved.
+    if (live.pendingHumanReview) continue;
     const reason = describeCheckpoint(cp);
     setPendingHumanReview({
       issueKey: cp.issueKey,

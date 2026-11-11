@@ -55,12 +55,20 @@ program
 
     console.log(`[jira-harness] task=${task.id} branch=${branchName} repo=${opts.repo}`);
 
+    // NaN here used to mean "zero iterations, report failure" with no hint why.
+    const maxIterations = Number(opts.maxIterations);
+    const maxBudgetUsd = Number(opts.maxBudgetUsd);
+    if (!Number.isInteger(maxIterations) || maxIterations < 1 || !Number.isFinite(maxBudgetUsd) || maxBudgetUsd <= 0) {
+      console.error("[jira-harness] --max-iterations must be a positive integer and --max-budget-usd a positive number");
+      process.exit(1);
+    }
+
     const result = await runCloseLoop(task, {
       repoPath: resolve(opts.repo),
       branchName,
       gates: [{ name: "test", command: opts.verify }],
-      maxIterations: Number(opts.maxIterations),
-      maxBudgetUsd: Number(opts.maxBudgetUsd),
+      maxIterations,
+      maxBudgetUsd,
       permissionMode: opts.permissionMode,
     });
 
@@ -84,6 +92,14 @@ program
       "continuously, which polls on its own — see HANDOFF.md.",
   )
   .action(async () => {
+    // A standalone run writes its proposal to pending-state.json, which a running bot
+    // never re-reads and overwrites on its next save — the paid analysis just vanishes.
+    const { runningBotPid } = await import("./bot/lock.js");
+    const botPid = runningBotPid();
+    if (botPid) {
+      console.error(`[queue] бот уже запущен (pid ${botPid}) и сам опрашивает очередь — отдельный запуск queue потерял бы своё предложение. Используй /start в Telegram или дашборд.`);
+      process.exit(1);
+    }
     try {
       const outcome = await runQueueOnce();
       console.log(`[queue] ${JSON.stringify(outcome)}`);
@@ -155,8 +171,11 @@ program
   .action(async () => {
     const { config } = await import("./config.js");
     const { startDashboardServer, dashboardUrl } = await import("./web/server.js");
-    startDashboardServer(config.dashboard.port);
+    startDashboardServer(config.dashboard.port, undefined, undefined, config.dashboard.host);
     console.log(`[dashboard] ${dashboardUrl(config.dashboard.port)}`);
   });
 
-program.parseAsync(process.argv);
+program.parseAsync(process.argv).catch((err: Error) => {
+  console.error(`[jira-harness] ${err.message}`);
+  process.exit(1);
+});
