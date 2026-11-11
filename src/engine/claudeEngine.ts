@@ -65,6 +65,17 @@ export function callContextTokens(usage: Record<string, unknown> | undefined): n
   return Number(usage.input_tokens ?? 0) + Number(usage.cache_read_input_tokens ?? 0) + Number(usage.cache_creation_input_tokens ?? 0);
 }
 
+// Which signal ended the process, if one did. The CLI traps SIGTERM/SIGINT and exits
+// 143/130 itself rather than dying by the signal — the same thing as far as anyone
+// asking "was this killed" is concerned. Reproduced live: a /kill surfaced as "claude
+// exited with code 143: <stderr noise>" instead of as a manual stop.
+export function killSignalOf(code: number | null, signal: string | null): string | null {
+  if (signal) return signal;
+  if (code === 143) return "SIGTERM";
+  if (code === 130) return "SIGINT";
+  return null;
+}
+
 export function pickResultText(rawResult: string, lastAssistantText: string): string {
   return rawResult.trim() || lastAssistantText;
 }
@@ -128,10 +139,12 @@ export async function runClaudeTurn(opts: RunClaudeTurnOptions): Promise<ClaudeT
   let contextTokens = 0;
 
   await new Promise<void>((resolve, reject) => {
-    const child = spawn("claude", args, { cwd: opts.cwd, env: buildAgentEnv() });
+    // stdin closed explicitly: left as an open pipe, the CLI waits ~3s for input that
+    // never comes on every single turn ("no stdin data received in 3s").
+    const child = spawn("claude", args, { cwd: opts.cwd, env: buildAgentEnv(), stdio: ["ignore", "pipe", "pipe"] });
     if (opts.killable !== false) trackTaskChild(child);
 
-    const rl = createInterface({ input: child.stdout });
+    const rl = createInterface({ input: child.stdout! });
     rl.on("line", (line) => {
       if (!line.trim()) return;
       let event: Record<string, unknown>;
@@ -163,11 +176,12 @@ export async function runClaudeTurn(opts: RunClaudeTurnOptions): Promise<ClaudeT
       }
     });
 
-    child.stderr.on("data", (chunk) => (stderrText += chunk));
+    child.stderr!.on("data", (chunk) => (stderrText += chunk));
     child.on("error", reject);
     child.on("close", (code, signal) => {
-      if (signal) {
-        reject(new Error(`claude killed by ${signal}`));
+      const killedBy = killSignalOf(code, signal);
+      if (killedBy) {
+        reject(new Error(`claude killed by ${killedBy}`));
         return;
       }
       if (code !== 0 && !resultLine) {

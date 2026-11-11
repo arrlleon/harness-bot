@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildAgentEnv, pickResultText, callContextTokens } from "./claudeEngine.js";
+import { buildAgentEnv, pickResultText, callContextTokens, killSignalOf } from "./claudeEngine.js";
 
 test("buildAgentEnv strips every harness secret, leaving everything else untouched", () => {
   const source = {
@@ -58,4 +58,17 @@ test("callContextTokens sums one API call's input, cache_read and cache_creation
 test("callContextTokens is 0 for a missing or all-zero (synthetic message) usage", () => {
   assert.equal(callContextTokens(undefined), 0);
   assert.equal(callContextTokens({ input_tokens: 0, output_tokens: 0 }), 0);
+});
+
+// Reproduced live: the claude CLI traps SIGTERM and exits 143 on its own, so /kill
+// showed up as an ordinary non-zero exit instead of a manual stop.
+test("killSignalOf recognises a real signal and the exit codes the CLI uses when it traps one", () => {
+  assert.equal(killSignalOf(null, "SIGTERM"), "SIGTERM");
+  assert.equal(killSignalOf(143, null), "SIGTERM");
+  assert.equal(killSignalOf(130, null), "SIGINT");
+});
+
+test("killSignalOf is null for an ordinary exit, clean or not", () => {
+  assert.equal(killSignalOf(0, null), null);
+  assert.equal(killSignalOf(1, null), null);
 });
