@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { symlink, access } from "node:fs/promises";
+import { symlink, access, readFile } from "node:fs/promises";
 
 const execFileAsync = promisify(execFile);
 
@@ -54,6 +54,19 @@ export async function createWorktree(repoPath: string, branchName: string, start
 // Modeled on Avengers Harness's "rebase onto fresh dev before gates" rule, but simpler
 // here: a worktree with zero commits of its own has nothing to replay, so there's no
 // rebase conflict to resolve — it only has to start from the right commit.
+// Worktrees borrow the main checkout's node_modules (see createWorktree). That's only
+// right while both agree on what should be installed: reproduced live (XEN-540) with
+// back-ai's main checkout missing a dependency its package.json already listed — eight
+// suites "failed to run" and build was red before the agent touched anything. Returns
+// the lockfile that differs, or null.
+export async function lockfileDrift(repoPath: string, worktreeDir: string): Promise<string | null> {
+  for (const name of ["yarn.lock", "package-lock.json", "pnpm-lock.yaml"]) {
+    const [main, tree] = await Promise.all([readFile(join(repoPath, name), "utf8").catch(() => null), readFile(join(worktreeDir, name), "utf8").catch(() => null)]);
+    if (main !== null && tree !== null && main !== tree) return name;
+  }
+  return null;
+}
+
 export async function fetchFreshBase(repoPath: string, targetBranch: string): Promise<string> {
   await execFileAsync("git", ["fetch", "origin", targetBranch], { cwd: repoPath });
   return `origin/${targetBranch}`;
@@ -172,7 +185,7 @@ async function resolveDiffBase(worktreeDir: string, baseBranch: string): Promise
 export async function getWorktreeDiff(worktreeDir: string, baseBranch: string): Promise<string> {
   await execFileAsync("git", ["add", "-N", "."], { cwd: worktreeDir });
   const base = await resolveDiffBase(worktreeDir, baseBranch);
-  const { stdout } = await execFileAsync("git", ["diff", base], { cwd: worktreeDir, maxBuffer: 1024 * 1024 * 10 });
+  const { stdout } = await execFileAsync("git", ["diff", base], { cwd: worktreeDir, maxBuffer: 1024 * 1024 * 100 });
   return stdout;
 }
 

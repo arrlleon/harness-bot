@@ -32,7 +32,7 @@ function buildGates(prefix: "BACKEND" | "FRONTEND", defaultTestCommand: string):
   const lint = process.env[`${prefix}_GATE_LINT`];
   if (lint) gates.push({ name: "lint", command: lint });
   // `${prefix}_TEST_STRICT` opts into a diff-scoped test command (see e.g.
-  // scripts/scoped-test-backend.sh, wired via BACKEND_VERIFY_CMD) ignoring its
+  // scripts/scoped-test.mjs, wired via BACKEND_VERIFY_CMD) ignoring its
   // baseline — XEN-541 (2026-11-10): back-ai's full 1211-file `yarn test` took 45+
   // minutes, on every iteration. A diff-scoped run's baseline is always vacuously
   // empty (nothing's changed yet at baseline time), so there's no real "N pre-existing

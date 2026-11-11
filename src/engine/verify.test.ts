@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { establishBaselines, runGates } from "./verify.js";
+import { establishBaselines, runGates, compareGate, classifyCrash, parseFailureCount, gateEnv, stripAnsi, GateInfraError } from "./verify.js";
 import type { GateSpec } from "../types.js";
 
 // All commands here are synthetic (echo/exit), not real project scripts — these tests
@@ -147,4 +147,44 @@ test("establishBaselines skips running a strict gate's command at all", async ()
   const baselines = await establishBaselines(".", gates);
   assert.equal(baselines.length, 1);
   assert.equal(baselines[0].name, "test");
+});
+
+// Reproduced live (XEN-540): tsc died with "JavaScript heap out of memory" at baseline,
+// which recorded { exitedZero: false, failureCount: null } — and compareGate then
+// passed the gate for the rest of the task whatever the code did.
+test("a gate that runs out of memory throws GateInfraError instead of recording a baseline", async () => {
+  const gates: GateSpec[] = [{ name: "typecheck", command: "echo 'FATAL ERROR: Ineffective mark-compacts near heap limit Allocation failed - JavaScript heap out of memory' && exit 134" }];
+  await assert.rejects(() => establishBaselines(".", gates), GateInfraError);
+  await assert.rejects(() => runGates(".", gates, []), GateInfraError);
+});
+
+test("classifyCrash recognises timeout, buffer overflow and OOM, and nothing else", () => {
+  assert.match(classifyCrash({ killed: true, signal: "SIGKILL" }, "", 60_000) ?? "", /не завершился/);
+  assert.match(classifyCrash({ code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" }, "", 60_000) ?? "", /буфера/);
+  assert.match(classifyCrash({ code: 134 }, "JavaScript heap out of memory", 60_000) ?? "", /памяти/);
+  assert.equal(classifyCrash({ code: 1 }, "src/a.ts(1,1): error TS1005: ',' expected.", 60_000), undefined);
+});
+
+test("compareGate fails a gate whose baseline was countable but whose current output isn't", () => {
+  const gate: GateSpec = { name: "typecheck", command: "tsc" };
+  const baseline = { name: "typecheck", command: "tsc", exitedZero: false, failureCount: 53 };
+  assert.equal(compareGate(gate, baseline, false, "something unrecognisable"), false);
+  assert.equal(compareGate(gate, baseline, false, "a.ts(1,1): error TS1: x\n".repeat(53)), true);
+  assert.equal(compareGate(gate, baseline, false, "a.ts(1,1): error TS1: x\n".repeat(54)), false);
+});
+
+test("the build gate is countable: nest build's summary, colour codes and all", () => {
+  const raw = "\u001b[91merror\u001b[0m\u001b[90m TS2307: \u001b[0mCannot find module\n\nFound 8 error(s).\n";
+  assert.equal(parseFailureCount("build", stripAnsi(raw)), 8);
+  // Unstripped, the colour codes sit between "error" and "TS2307" and hide the match.
+  assert.equal(parseFailureCount("typecheck", raw), null);
+  assert.equal(parseFailureCount("typecheck", stripAnsi(raw)), 1);
+});
+
+test("gateEnv strips harness secrets and raises the Node heap without clobbering existing options", () => {
+  const env = gateEnv({ PATH: "/usr/bin", JIRA_PAT: "secret", GITLAB_TOKEN: "secret", NODE_OPTIONS: "--enable-source-maps" });
+  assert.equal(env.JIRA_PAT, undefined);
+  assert.equal(env.GITLAB_TOKEN, undefined);
+  assert.match(env.NODE_OPTIONS ?? "", /--enable-source-maps --max-old-space-size=\d+/);
+  assert.equal(gateEnv({ NODE_OPTIONS: "--max-old-space-size=8192" }).NODE_OPTIONS, "--max-old-space-size=8192");
 });

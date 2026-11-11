@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildReviewPrompt, parseReviewResponse, buildReviewFixPrompt, formatReviewRound } from "./review.js";
+import { buildReviewPrompt, parseReviewResponse, buildReviewFixPrompt, formatReviewRound, isReviewResponseWellFormed } from "./review.js";
 import type { ReviewFinding, TaskSpec } from "../types.js";
 
 const task: TaskSpec = {
@@ -26,9 +26,26 @@ test("buildReviewPrompt handles a task with no frozen acceptance criteria", () =
 });
 
 test("buildReviewPrompt caps the embedded diff", () => {
-  const longDiff = "x".repeat(20_000);
+  const longDiff = "x".repeat(200_000);
   const prompt = buildReviewPrompt(task, longDiff);
-  assert.ok(prompt.length < 12_000, `expected the diff to be capped, got a ${prompt.length}-char prompt`);
+  assert.ok(prompt.length < 65_000, `expected the diff to be capped, got a ${prompt.length}-char prompt`);
+});
+
+// Reproduced live (XEN-540): with the old 8000-char cap the reviewer saw two files of
+// a ten-file diff and approved the rest unseen.
+test("buildReviewPrompt lists every changed file when the diff had to be truncated", () => {
+  const body = "x".repeat(40_000);
+  const diff = `diff --git a/src/a.ts b/src/a.ts\n${body}\ndiff --git a/src/b.ts b/src/b.ts\n${body}`;
+  const prompt = buildReviewPrompt(task, diff);
+  assert.match(prompt, /diff выше обрезан/);
+  assert.match(prompt, /- src\/a\.ts/);
+  assert.match(prompt, /- src\/b\.ts/);
+});
+
+test("isReviewResponseWellFormed tells an explicit 'НЕТ' apart from an answer in no known format", () => {
+  assert.equal(isReviewResponseWellFormed("БЛОКИРУЮЩИЕ:\nНЕТ\n\nЗАМЕЧАНИЯ:\nНЕТ"), true);
+  assert.equal(isReviewResponseWellFormed("Looks good to me, ship it."), false);
+  assert.equal(isReviewResponseWellFormed("You've hit your session limit"), false);
 });
 
 test("parseReviewResponse extracts both blocking and nonblocking findings", () => {

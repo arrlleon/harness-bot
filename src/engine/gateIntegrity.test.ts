@@ -154,3 +154,37 @@ test("parseGateIntegrityViolations reports each distinct violation once, not per
 test("parseGateIntegrityViolations returns nothing for an empty diff", () => {
   assert.deepEqual(parseGateIntegrityViolations(""), []);
 });
+
+// Audit findings (2026-11-12): each of these turned a red gate green without fixing
+// anything, and none was caught before.
+test("parseGateIntegrityViolations flags an added .only (drops every other test in the file)", () => {
+  const diff = ["diff --git a/src/a.spec.ts b/src/a.spec.ts", "--- a/src/a.spec.ts", "+++ b/src/a.spec.ts", "@@ -1 +1 @@", "-it('x', () => {})", "+it.only('x', () => {})"].join("\n");
+  assert.equal(parseGateIntegrityViolations(diff).length, 1);
+});
+
+test("parseGateIntegrityViolations flags jest config kept inside package.json", () => {
+  const diff = ["diff --git a/package.json b/package.json", "--- a/package.json", "+++ b/package.json", "@@ -1 +1 @@", '+    "testPathIgnorePatterns": ["folders"],'].join("\n");
+  const violations = parseGateIntegrityViolations(diff);
+  assert.equal(violations.length, 1);
+  assert.match(violations[0].description, /testPathIgnorePatterns/);
+});
+
+test("parseGateIntegrityViolations flags tsconfig and .jest-quarantine edits, including pure deletions", () => {
+  const diff = [
+    "diff --git a/tsconfig.json b/tsconfig.json", "--- a/tsconfig.json", "+++ b/tsconfig.json", "@@ -1 +0,0 @@", '-    "strict": true,',
+    "diff --git a/.jest-quarantine b/.jest-quarantine", "--- a/.jest-quarantine", "+++ b/.jest-quarantine", "@@ -1 +1,2 @@", "+modules/folders/folders.service.spec.ts",
+  ].join("\n");
+  assert.equal(parseGateIntegrityViolations(diff).length, 2);
+});
+
+test("parseGateIntegrityViolations flags a test file renamed out of the runner's reach", () => {
+  const diff = ["diff --git a/src/a.spec.ts b/src/a.spec.ts.bak", "similarity index 100%", "rename from src/a.spec.ts", "rename to src/a.spec.ts.bak"].join("\n");
+  const violations = parseGateIntegrityViolations(diff);
+  assert.equal(violations.length, 1);
+  assert.match(violations[0].description, /переименован/);
+});
+
+test("parseGateIntegrityViolations leaves a test-to-test rename alone", () => {
+  const diff = ["diff --git a/src/a.spec.ts b/src/b.spec.ts", "similarity index 100%", "rename from src/a.spec.ts", "rename to src/b.spec.ts"].join("\n");
+  assert.deepEqual(parseGateIntegrityViolations(diff), []);
+});

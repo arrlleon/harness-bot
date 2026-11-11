@@ -99,7 +99,7 @@ export interface AcceptanceTestOutcome {
 export async function writeAcceptanceTest(
   worktreeDir: string,
   task: TaskSpec,
-  opts: { model: string; extraDeniedPaths?: string[]; ext: string },
+  opts: { model: string; extraDeniedPaths?: string[]; ext: string; maxBudgetUsd?: number },
 ): Promise<AcceptanceTestOutcome> {
   const relPath = `src/__acceptance__/${task.id.toLowerCase()}.${opts.ext}`;
   const prompt = buildAcceptanceTestPrompt(task, relPath);
@@ -110,6 +110,7 @@ export async function writeAcceptanceTest(
     permissionMode: "acceptEdits",
     extraDeniedPaths: opts.extraDeniedPaths,
     model: opts.model,
+    maxBudgetUsd: opts.maxBudgetUsd,
   });
 
   if (turn.isError) {

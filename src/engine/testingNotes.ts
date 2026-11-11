@@ -59,7 +59,7 @@ export function buildTestingNotesPrompt(task: TaskSpec, diffText: string): strin
 export async function generateTestingNotes(
   worktreeDir: string,
   task: TaskSpec,
-  opts: { model: string; baseBranch: string },
+  opts: { model: string; baseBranch: string; maxBudgetUsd?: number },
 ): Promise<TestingNotesOutcome> {
   const diffText = await getWorktreeDiff(worktreeDir, opts.baseBranch).catch(() => "");
 
@@ -69,6 +69,7 @@ export async function generateTestingNotes(
     permissionMode: "acceptEdits",
     disallowedToolsOverride: "Bash,Edit,Write,MultiEdit",
     model: opts.model,
+    maxBudgetUsd: opts.maxBudgetUsd,
   });
 
   if (turn.isError) {

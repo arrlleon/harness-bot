@@ -10,7 +10,7 @@ import type {
 import { runClaudeTurn } from "./claudeEngine.js";
 import { establishBaselines, runGates } from "./verify.js";
 import { buildFeedbackPrompt, buildInitialPrompt } from "./prompts.js";
-import { createWorktree, commitAll, fetchFreshBase, rebaseOntoFreshBase } from "./git.js";
+import { createWorktree, commitAll, fetchFreshBase, lockfileDrift, rebaseOntoFreshBase } from "./git.js";
 import { writeAcceptanceTest } from "./acceptanceTest.js";
 import { readMemoryFiles, buildMemoryContextBlock, updateProjectMemory } from "./memory.js";
 import { fingerprintFailure } from "./stuckDetector.js";
@@ -148,11 +148,29 @@ async function runPostImplementSuccess(
           costUsd: totalCostUsd,
           summary: `Ревьюю изменения (раунд ${round}/${config.review.maxRounds})`,
         });
-        const reviewResult = await reviewChanges(worktreeDir, task, config.review);
+        const reviewBudget = config.maxBudgetUsd - totalCostUsd;
+        if (reviewBudget <= 0) {
+          return { task, success: false, iterations, totalCostUsd, stopReason: "max_budget", worktreeDir, acceptanceTestPath };
+        }
+        const reviewResult = await reviewChanges(worktreeDir, task, { ...config.review, maxBudgetUsd: reviewBudget });
         totalCostUsd += reviewResult.costUsd;
         reviewFindings = reviewResult.findings;
-        if (reviewResult.reason) config.onLog?.(`⚠️ Не удалось провести ревью (${reviewResult.reason})`);
         writeTaskContext(task.id, "reviewer", `round-${round}.md`, formatReviewRound(reviewFindings, reviewResult.reason));
+        // A review that didn't happen is not an approval — see reviewChanges.
+        if (reviewResult.reason) {
+          config.onLog?.(`⚠️ Не удалось провести ревью (${reviewResult.reason})`);
+          return {
+            task,
+            success: false,
+            iterations,
+            totalCostUsd,
+            stopReason: "review_blocked",
+            worktreeDir,
+            acceptanceTestPath,
+            reviewFindings: [{ blocking: true, description: `ревью не состоялось (${reviewResult.reason}) — изменения никем не проверены` }],
+            reviewRounds,
+          };
+        }
 
         blocking = reviewFindings.filter((f) => f.blocking);
         if (blocking.length === 0) break; // ревьюер доволен
@@ -282,10 +300,15 @@ async function runPostImplementSuccess(
 
   // Purely informational, never blocking (unlike review) — a tester's write-up
   // isn't a gate, so its own failure just means no write-up, not a stuck task.
+  // The three write-ups below are informational — never worth blowing the task's budget
+  // for. Each gets only what's left; with nothing left they're skipped, not failed.
+  const budgetLeft = (): number => config.maxBudgetUsd - totalCostUsd;
+  const MIN_WRITEUP_BUDGET_USD = 0.05;
+
   let testingNotes: string | undefined;
-  if (config.testingNotes) {
+  if (config.testingNotes && budgetLeft() >= MIN_WRITEUP_BUDGET_USD) {
     config.onIteration?.({ iteration: iterations.length, phase: "writing_testing_notes", costUsd: totalCostUsd, summary: "Пишу инструкцию для тестировщика" });
-    const notesResult = await generateTestingNotes(worktreeDir, task, config.testingNotes);
+    const notesResult = await generateTestingNotes(worktreeDir, task, { ...config.testingNotes, maxBudgetUsd: budgetLeft() });
     totalCostUsd += notesResult.costUsd;
     testingNotes = notesResult.notes;
     if (notesResult.reason) config.onLog?.(`⚠️ Не удалось сгенерировать инструкцию для тестировщика (${notesResult.reason})`);
@@ -295,18 +318,18 @@ async function runPostImplementSuccess(
   // (whoever asked for the ticket, not a tester), different destination (the closing
   // Telegram message, not the Jira comment).
   let closeReport: string | undefined;
-  if (config.closeReport) {
+  if (config.closeReport && budgetLeft() >= MIN_WRITEUP_BUDGET_USD) {
     config.onIteration?.({ iteration: iterations.length, phase: "writing_close_report", costUsd: totalCostUsd, summary: "Пишу сводку для тебя" });
-    const reportResult = await generateCloseReport(worktreeDir, task, config.closeReport);
+    const reportResult = await generateCloseReport(worktreeDir, task, { ...config.closeReport, maxBudgetUsd: budgetLeft() });
     totalCostUsd += reportResult.costUsd;
     closeReport = reportResult.report;
     if (reportResult.reason) config.onLog?.(`⚠️ Не удалось написать сводку (${reportResult.reason})`);
   }
 
   let memoryUpdated = false;
-  if (config.memory) {
+  if (config.memory && budgetLeft() >= MIN_WRITEUP_BUDGET_USD) {
     config.onIteration?.({ iteration: iterations.length, phase: "updating_memory", costUsd: totalCostUsd, summary: "Обновляю project memory" });
-    const memResult = await updateProjectMemory(worktreeDir, task, { ...config.memory, role: "dev" });
+    const memResult = await updateProjectMemory(worktreeDir, task, { ...config.memory, role: "dev", maxBudgetUsd: budgetLeft() });
     totalCostUsd += memResult.costUsd;
     memoryUpdated = memResult.updated;
     if (memResult.reason) config.onLog?.(`⚠️ Не удалось обновить project memory (${memResult.reason})`);
@@ -405,6 +428,13 @@ export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promis
     });
   }
 
+  if (!config.resumeFrom && !config.existingWorktreeDir) {
+    const drifted = await lockfileDrift(config.repoPath, worktreeDir);
+    if (drifted) {
+      config.onLog?.(`⚠️ ${drifted} в задаче отличается от основного чекаута ${config.repoPath} — node_modules там устарел, часть гейтов может падать не по вине задачи. Запусти установку зависимостей в основном чекауте.`);
+    }
+  }
+
   let totalCostUsd: number;
   let gates: GateSpec[];
   let extraDeniedPaths: string[] | undefined;
@@ -456,6 +486,7 @@ export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promis
       const result = await writeAcceptanceTest(worktreeDir, task, {
         model: config.acceptanceTest.model,
         ext: config.acceptanceTest.ext,
+        maxBudgetUsd: config.maxBudgetUsd,
         extraDeniedPaths: config.extraDeniedPaths,
       });
       totalCostUsd += result.costUsd;
@@ -472,7 +503,7 @@ export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promis
     // analyzing-turn message: a long silent gap here reads as "stuck", not "working".
     const gateNames = gates.map((g) => g.name).join(", ");
     config.onIteration?.({ iteration: 0, phase: "baseline", costUsd: totalCostUsd, summary: `Считаю baseline по гейтам: ${gateNames}` });
-    baselines = await establishBaselines(worktreeDir, gates);
+    baselines = await establishBaselines(worktreeDir, gates, config.onLog);
 
     // Read-only context, injected directly rather than left for the agent to stumble
     // onto — the project's own CLAUDE.md only auto-loads AGENTS.md, not memory files.

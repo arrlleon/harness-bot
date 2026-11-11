@@ -1,17 +1,76 @@
 import { exec } from "node:child_process";
-import { promisify } from "node:util";
 import type { GateBaseline, GateResult, GateSpec, VerifyResult } from "../types.js";
+import { buildAgentEnv } from "./claudeEngine.js";
 
-const execAsync = promisify(exec);
+// A gate that couldn't actually run (ran out of memory, hung past its timeout, drowned
+// its own output buffer) says nothing about the code under test. Thrown rather than
+// reported as a normal gate failure: the agent can't fix it by editing files, and
+// treating it as "the gate was red" is exactly how a crashed baseline used to turn a
+// gate into a permanent pass (see compareGate).
+export class GateInfraError extends Error {}
 
-async function runRaw(cwd: string, command: string): Promise<{ exitedZero: boolean; output: string }> {
-  try {
-    const { stdout, stderr } = await execAsync(command, { cwd, maxBuffer: 1024 * 1024 * 20 });
-    return { exitedZero: true, output: stdout + stderr };
-  } catch (err: unknown) {
-    const e = err as { stdout?: string; stderr?: string; message: string };
-    return { exitedZero: false, output: (e.stdout ?? "") + (e.stderr ?? "") || e.message };
+const DEFAULT_GATE_TIMEOUT_MS = 30 * 60_000;
+const GATE_HEAP_MB = 4096;
+
+function gateTimeoutMs(): number {
+  const configured = Number(process.env.GATE_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_GATE_TIMEOUT_MS;
+}
+
+// Gates run the repo's own code (tests the agent itself may have written), and their
+// output goes straight back into the agent's next prompt — so they get the same
+// secret-stripped env the `claude` child does. NODE_OPTIONS raises the heap: reproduced
+// live (XEN-540) that `tsc --noEmit` on back-ai dies with "JavaScript heap out of
+// memory" at Node's default limit on this machine.
+export function gateEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env = buildAgentEnv(source);
+  const existing = env.NODE_OPTIONS ?? "";
+  if (!/--max-old-space-size/.test(existing)) {
+    env.NODE_OPTIONS = `${existing} --max-old-space-size=${GATE_HEAP_MB}`.trim();
   }
+  return env;
+}
+
+export function stripAnsi(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
+}
+
+interface RawRun {
+  exitedZero: boolean;
+  output: string;
+  // Set when the command itself didn't get to do its job — see GateInfraError.
+  crash?: string;
+}
+
+// Pure so the classification is testable without spawning anything.
+export function classifyCrash(err: { killed?: boolean; signal?: string | null; code?: unknown } | null, output: string, timeoutMs: number): string | undefined {
+  if (err?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") return "вывод превысил лимит буфера";
+  if (err?.killed) return `не завершился за ${Math.round(timeoutMs / 60_000)} мин и был остановлен`;
+  if (/JavaScript heap out of memory|FATAL ERROR: .*Allocation failed/.test(output)) return "не хватило памяти (JavaScript heap out of memory)";
+  return undefined;
+}
+
+function runRaw(cwd: string, command: string): Promise<RawRun> {
+  const timeoutMs = gateTimeoutMs();
+  return new Promise((resolve) => {
+    exec(command, { cwd, maxBuffer: 1024 * 1024 * 64, timeout: timeoutMs, killSignal: "SIGKILL", env: gateEnv() }, (err, stdout, stderr) => {
+      const output = stripAnsi(String(stdout ?? "") + String(stderr ?? "")) || (err?.message ?? "");
+      if (!err) return resolve({ exitedZero: true, output });
+      resolve({ exitedZero: false, output, crash: classifyCrash(err, output, timeoutMs) });
+    });
+  });
+}
+
+// One retry: memory pressure on a dev machine is transient often enough that a second
+// attempt is worth it before giving up on the whole task.
+async function runGateCommand(cwd: string, gate: GateSpec): Promise<RawRun> {
+  let run = await runRaw(cwd, gate.command);
+  if (run.crash) run = await runRaw(cwd, gate.command);
+  if (run.crash) {
+    throw new GateInfraError(`гейт "${gate.name}" не смог отработать: ${run.crash}. Это проблема окружения, а не кода задачи.\n${run.output.slice(-600)}`);
+  }
+  return run;
 }
 
 // Per-gate count parsers. A gate without one (or whose output doesn't match) falls
@@ -37,9 +96,18 @@ const GATE_PARSERS: Record<string, (output: string) => number | null> = {
     const match = output.match(/\b(\d+)\s+problems?\b/i);
     return match ? Number(match[1]) : null;
   },
+  // `nest build` / `tsc -b`: "Found N error(s)." when present, else the TS error count.
+  // Without this a build that was already red at baseline (back-ai: 8 pre-existing
+  // errors) could never be compared and was permanently waved through.
+  build: (output) => {
+    const found = output.match(/Found (\d+) errors?/i);
+    if (found) return Number(found[1]);
+    const matches = output.match(/error TS\d+:/g);
+    return matches ? matches.length : null;
+  },
 };
 
-function parseFailureCount(gateName: string, output: string): number | null {
+export function parseFailureCount(gateName: string, output: string): number | null {
   return GATE_PARSERS[gateName]?.(output) ?? null;
 }
 
@@ -51,23 +119,28 @@ function parseFailureCount(gateName: string, output: string): number | null {
 // gate's own pre-existing count (or, when uncountable, its own pre-existing exit code)
 // means a gate that was already broken for unrelated reasons doesn't hold the agent's
 // fix hostage.
-export async function establishBaselines(cwd: string, gates: GateSpec[]): Promise<GateBaseline[]> {
+export async function establishBaselines(cwd: string, gates: GateSpec[], onLog?: (line: string) => void): Promise<GateBaseline[]> {
   const baselines: GateBaseline[] = [];
   for (const gate of gates) {
-    // A strict gate (the acceptance test; now optionally the diff-scoped test gate —
+    // A strict gate (the acceptance test; optionally the diff-scoped test gate —
     // see config.ts's `${prefix}_TEST_STRICT`) never consults its baseline at all
     // (runGates below branches on `gate.strict` before even looking), so running one
-    // here was pure wasted work — for a diff-scoped command specifically, it's also
-    // always vacuous (nothing's changed yet at baseline time, so nothing would be
-    // found to test).
+    // here was pure wasted work.
     if (gate.strict) continue;
-    const { exitedZero, output } = await runRaw(cwd, gate.command);
-    baselines.push({ name: gate.name, command: gate.command, exitedZero, failureCount: parseFailureCount(gate.name, output) });
+    const { exitedZero, output } = await runGateCommand(cwd, gate);
+    const failureCount = parseFailureCount(gate.name, output);
+    if (!exitedZero && failureCount === null) {
+      // Not an error — some gates genuinely have no countable output — but it does mean
+      // this gate can't tell "still broken the same way" from "broken worse" for the
+      // rest of the task, and a human should know that going in.
+      onLog?.(`⚠️ Гейт "${gate.name}" красный ещё до правок и его вывод не поддаётся подсчёту — для этой задачи он не сможет отличить новую поломку от старой.`);
+    }
+    baselines.push({ name: gate.name, command: gate.command, exitedZero, failureCount });
   }
   return baselines;
 }
 
-function compareGate(gate: GateSpec, baseline: GateBaseline, exitedZero: boolean, output: string): boolean {
+export function compareGate(gate: GateSpec, baseline: GateBaseline, exitedZero: boolean, output: string): boolean {
   if (exitedZero) return true;
   const failureCount = parseFailureCount(gate.name, output);
   // Can't count-compare when either side's output doesn't match the expected
@@ -77,6 +150,9 @@ function compareGate(gate: GateSpec, baseline: GateBaseline, exitedZero: boolean
   if (baseline.failureCount !== null && failureCount !== null) {
     return failureCount <= baseline.failureCount;
   }
+  // The baseline was countable and this run isn't: the gate is now failing in a way it
+  // wasn't before (a syntax error that stops the tool before its normal summary, say).
+  if (baseline.failureCount !== null) return false;
   return !baseline.exitedZero; // gate was already failing at baseline time — not this fix's fault
 }
 
@@ -88,7 +164,7 @@ export async function runGates(cwd: string, gates: GateSpec[], baselines: GateBa
   const results: GateResult[] = [];
   for (const gate of gates) {
     const baseline = baselines.find((b) => b.name === gate.name);
-    const { exitedZero, output } = await runRaw(cwd, gate.command);
+    const { exitedZero, output } = await runGateCommand(cwd, gate);
     // Strict gates never consult their baseline — a brand-new acceptance test failing
     // at baseline (no fix exists yet) is expected, not a pre-existing condition to
     // tolerate; it must actually pass now, "no worse than before" isn't good enough.

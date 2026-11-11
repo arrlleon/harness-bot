@@ -42,3 +42,19 @@ test("fixing one gate while another stays broken changes the fingerprint (partia
   const after = [gate("test", "err B")]; // typecheck fixed, test still broken the same way
   assert.notEqual(fingerprintFailure(before), fingerprintFailure(after));
 });
+
+// Audit finding (2026-11-12): the fingerprint used the first three lines of each gate's
+// output — for the scoped test gate that's always the same banner, so two consecutive
+// DIFFERENT failures hashed identically and the task was declared stuck.
+test("two different failures behind an identical banner fingerprint differently", () => {
+  const banner = "[scoped-test] scoping to unit tests: src/a.spec.ts\nyarn run v1.22.22\n$ jest --ci src/a.spec.ts\n";
+  const first = [{ name: "test", command: "t", passed: false, output: banner + "● Folders › hides the subfolder\n  expected true, received false" }];
+  const second = [{ name: "test", command: "t", passed: false, output: banner + "● Folders › keeps the member\n  TypeError: cannot read properties of undefined" }];
+  assert.notEqual(fingerprintFailure(first), fingerprintFailure(second));
+});
+
+test("the same failure behind a banner still fingerprints the same", () => {
+  const out = "yarn run v1.22.22\n$ jest\n● Folders › hides the subfolder\n  expected true, received false";
+  const a = [{ name: "test", command: "t", passed: false, output: out }];
+  assert.equal(fingerprintFailure(a), fingerprintFailure(a.map((g) => ({ ...g }))));
+});

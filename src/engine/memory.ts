@@ -103,7 +103,7 @@ export interface MemoryUpdateOutcome {
 export async function updateProjectMemory(
   worktreeDir: string,
   task: TaskSpec,
-  opts: { model: string; baseBranch: string; role: AgentRole },
+  opts: { model: string; baseBranch: string; role: AgentRole; maxBudgetUsd?: number },
 ): Promise<MemoryUpdateOutcome> {
   const relPath = harnessMemoryPath(opts.role);
   const existing = await readIfExists(join(worktreeDir, relPath));
@@ -115,6 +115,7 @@ export async function updateProjectMemory(
     permissionMode: "acceptEdits",
     disallowedToolsOverride: "Bash,Edit,Write,MultiEdit",
     model: opts.model,
+    maxBudgetUsd: opts.maxBudgetUsd,
   });
 
   if (turn.isError) {

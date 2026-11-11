@@ -42,7 +42,7 @@ export function buildCloseReportPrompt(task: TaskSpec, diffText: string): string
 export async function generateCloseReport(
   worktreeDir: string,
   task: TaskSpec,
-  opts: { model: string; baseBranch: string },
+  opts: { model: string; baseBranch: string; maxBudgetUsd?: number },
 ): Promise<CloseReportOutcome> {
   const diffText = await getWorktreeDiff(worktreeDir, opts.baseBranch).catch(() => "");
 
@@ -52,6 +52,7 @@ export async function generateCloseReport(
     permissionMode: "acceptEdits",
     disallowedToolsOverride: "Bash,Edit,Write,MultiEdit",
     model: opts.model,
+    maxBudgetUsd: opts.maxBudgetUsd,
   });
 
   if (turn.isError) {

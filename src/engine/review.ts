@@ -13,6 +13,21 @@ export interface ReviewOutcome {
 // the category of problem automated checks structurally can't: architectural
 // decisions, security issues a passing test doesn't exercise, edge cases nobody wrote
 // a test for, convention violations.
+// 8000 used to be the cap — on a real multi-file task (XEN-540: ~50KB of diff) the
+// reviewer saw the first two files and signed off on the rest unseen.
+const MAX_REVIEW_DIFF_CHARS = 60_000;
+
+function truncationNote(diffText: string): string[] {
+  if (diffText.length <= MAX_REVIEW_DIFF_CHARS) return [];
+  const files = [...diffText.matchAll(/^diff --git a\/(.+?) b\//gm)].map((m) => m[1]);
+  return [
+    "",
+    "ВНИМАНИЕ: diff выше обрезан. Полный список изменённых файлов — открой и прочитай",
+    "сам те, что не поместились (у тебя есть доступ на чтение к рабочему дереву):",
+    ...files.map((f) => `- ${f}`),
+  ];
+}
+
 export function buildReviewPrompt(task: TaskSpec, diffText: string): string {
   const criteria =
     task.acceptanceCriteria.length > 0
@@ -28,8 +43,9 @@ export function buildReviewPrompt(task: TaskSpec, diffText: string): string {
     "",
     "Изменения (diff), уже прошедшие typecheck/lint/build/тесты:",
     "```diff",
-    diffText.slice(0, 8000),
+    diffText.slice(0, MAX_REVIEW_DIFF_CHARS),
     "```",
+    ...truncationNote(diffText),
     "",
     "Ты — независимый ревьюер. Найди то, что НЕ поймали автоматические проверки:",
     "архитектурные проблемы, уязвимости, граничные случаи без покрытия, нарушение",
@@ -52,6 +68,13 @@ export function buildReviewPrompt(task: TaskSpec, diffText: string): string {
 const BLOCKING_HEADING = /блокирующие\s*:?/i;
 const NONBLOCKING_HEADING = /замечания\s*:?/i;
 const BULLET_LINE = /^[-*•]\s+(.+)$/gm;
+
+// Whether the reviewer answered in the requested shape at all. parseReviewResponse
+// returns [] both for "НЕТ / НЕТ" and for free-form text it couldn't parse — the
+// caller has to tell those apart, or an unparseable answer reads as "approved".
+export function isReviewResponseWellFormed(text: string): boolean {
+  return text.search(BLOCKING_HEADING) !== -1;
+}
 
 export function parseReviewResponse(text: string): ReviewFinding[] {
   const blockIdx = text.search(BLOCKING_HEADING);
@@ -111,21 +134,37 @@ export function formatReviewRound(findings: ReviewFinding[], reason: string | un
 export async function reviewChanges(
   worktreeDir: string,
   task: TaskSpec,
-  opts: { model: string; baseBranch: string },
+  opts: { model: string; baseBranch: string; maxBudgetUsd?: number },
 ): Promise<ReviewOutcome> {
-  const diffText = await getWorktreeDiff(worktreeDir, opts.baseBranch).catch(() => "");
+  // Not caught: an unreadable diff is an infrastructure failure, and reviewing "" would
+  // just produce a confident approval of nothing.
+  const diffText = await getWorktreeDiff(worktreeDir, opts.baseBranch);
+  if (!diffText.trim()) return { findings: [], costUsd: 0, reason: "diff пустой — ревьюить нечего" };
 
-  const turn = await runClaudeTurn({
-    cwd: worktreeDir,
-    prompt: buildReviewPrompt(task, diffText),
-    permissionMode: "acceptEdits",
-    disallowedToolsOverride: "Bash,Edit,Write,MultiEdit",
-    model: opts.model,
-  });
-
-  if (turn.isError) {
-    return { findings: [], costUsd: turn.totalCostUsd, reason: `ход завершился ошибкой: ${turn.resultText.slice(0, 200)}` };
+  // Fail CLOSED: a turn that errored (session limit, budget, crash) or answered in no
+  // recognisable format used to come back as zero findings — i.e. "reviewer is happy" —
+  // and the task went on to push unreviewed. One retry, then the caller escalates.
+  let costUsd = 0;
+  let reason = "";
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const turn = await runClaudeTurn({
+      cwd: worktreeDir,
+      prompt: buildReviewPrompt(task, diffText),
+      permissionMode: "acceptEdits",
+      disallowedToolsOverride: "Bash,Edit,Write,MultiEdit",
+      model: opts.model,
+      maxBudgetUsd: opts.maxBudgetUsd,
+    });
+    costUsd += turn.totalCostUsd;
+    if (turn.isError) {
+      reason = `ход завершился ошибкой: ${turn.resultText.slice(0, 200)}`;
+      continue;
+    }
+    if (!isReviewResponseWellFormed(turn.resultText)) {
+      reason = "ответ ревьюера не в ожидаемом формате (нет раздела БЛОКИРУЮЩИЕ)";
+      continue;
+    }
+    return { findings: parseReviewResponse(turn.resultText), costUsd };
   }
-
-  return { findings: parseReviewResponse(turn.resultText), costUsd: turn.totalCostUsd };
+  return { findings: [], costUsd, reason };
 }

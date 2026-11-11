@@ -27,6 +27,10 @@ const HEURISTIC_PATTERNS: Array<{ name: string; pattern: RegExp }> = [
   { name: "pem-block", pattern: /-----BEGIN [A-Z ]+-----[\s\S]*?-----END [A-Z ]+-----/g },
   { name: "jwt", pattern: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g },
   { name: "aws-access-key", pattern: /\bAKIA[0-9A-Z]{16}\b/g },
+  { name: "gitlab-token", pattern: /\bgl(?:pat|dt|rt|cbt|ptt|ft|soat)-[A-Za-z0-9_.-]{20,}/g },
+  { name: "anthropic-key", pattern: /\bsk-ant-[A-Za-z0-9_-]{20,}/g },
+  { name: "github-token", pattern: /\bgh[pousr]_[A-Za-z0-9]{30,}\b/g },
+  { name: "telegram-bot-token", pattern: /\b\d{8,10}:[A-Za-z0-9_-]{35}\b/g },
 ];
 
 export function scrubSecretShapes(text: string): string {
