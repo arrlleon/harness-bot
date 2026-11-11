@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildContinuationPrompt, buildFeedbackPrompt, buildInitialPrompt } from "./prompts.js";
+import { buildContinuationPrompt, buildFeedbackPrompt, buildInitialPrompt, buildInterruptedResumePrompt } from "./prompts.js";
 import type { GateResult, TaskSpec } from "../types.js";
 
 test("buildInitialPrompt includes task id, title, description, and numbered criteria", () => {
@@ -93,4 +93,26 @@ test("buildFeedbackPrompt caps each gate's output independently", () => {
   assert.match(prompt, /short failure/);
   const lintSectionLength = prompt.split("### build")[0].length;
   assert.ok(lintSectionLength < 4200, `expected the lint section to be capped, got ${lintSectionLength} chars`);
+});
+
+// Reproduced live (XEN-540): the stopped session's gates had already caught a real tsc
+// error, but the fresh session was only told "re-review everything" and never saw it.
+test("buildContinuationPrompt leads the fresh session with the stopped session's failing gate output", () => {
+  const task: TaskSpec = { id: "XEN-540", title: "t", description: "d", acceptanceCriteria: ["c1"] };
+  const failed: GateResult[] = [{ name: "typecheck", command: "npx tsc --noEmit", passed: false, output: "documents.service.ts(373,62): error TS1005" }];
+  const prompt = buildContinuationPrompt(task, "diff --git a/x b/x", true, failed);
+  assert.match(prompt, /typecheck/);
+  assert.match(prompt, /error TS1005/);
+  assert.match(prompt, /fix these first/);
+});
+
+test("buildContinuationPrompt has no gate section when nothing was failing", () => {
+  const task: TaskSpec = { id: "XEN-540", title: "t", description: "d", acceptanceCriteria: [] };
+  assert.doesNotMatch(buildContinuationPrompt(task, "diff"), /fix these first/);
+});
+
+test("buildInterruptedResumePrompt doesn't claim to be a fresh session", () => {
+  const prompt = buildInterruptedResumePrompt();
+  assert.match(prompt, /interrupted/);
+  assert.doesNotMatch(prompt, /fresh session/);
 });

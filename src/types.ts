@@ -45,6 +45,12 @@ export interface CloseLoopResumeState {
   extraDeniedPaths?: string[];
   acceptanceTestPath?: string;
   previousFingerprint?: string;
+  // The gates that were failing when a context_budget stop happened (output already
+  // truncated). Reproduced live (XEN-540): the stopped turn's gates HAD run and caught
+  // a real tsc error, but only the token count survived into the needs_human reason —
+  // three fresh sessions in a row re-reviewed the whole diff without ever being told
+  // what the compiler had actually said.
+  failedGates?: GateResult[];
   // Present only when resuming a brief raised during the review<->fix loop, not the
   // main implement loop above (iteration/previousFingerprint are meaningless there and
   // go unused on this path). `round` is which review round raised it; `blocking` is
@@ -217,6 +223,10 @@ export interface ClaudeTurnResult {
   terminalReason: string;
   totalCostUsd: number;
   usage: ClaudeTurnUsage;
+  // Real context size at the turn's LAST API call (that call's own input + cache_read
+  // + cache_creation) — NOT derivable from `usage` above, which the CLI sums across
+  // every API call in the turn. 0 when the stream carried no per-call usage at all.
+  contextTokens: number;
 }
 
 export interface VerifyResult {
@@ -248,6 +258,12 @@ export type QueueRunOutcome =
       // outcome (e.g. the agent erred out before any commit). For a cross-repo task,
       // the sum of whichever half(s) actually ran review by this point.
       reviewRounds?: number;
+      // costUsd above is cumulative for the whole task. Set by a continuation
+      // (continueNeedsHuman / resolveBrief) to the part of it an earlier needs_human
+      // record already put into history, so recordOutcome stores only the increment —
+      // reproduced live (XEN-540): five records of 10.14/10.23/13.02/16.97/19.50 made
+      // costToday read $47 for ~$25 of real spend, falsely tripping the daily cap.
+      costAlreadyRecordedUsd?: number;
     }
   // The agent genuinely isn't sure and raised a brief instead of guessing — distinct
   // from needs_human (which means something went wrong); this just means a decision
@@ -263,6 +279,8 @@ export type QueueRunOutcome =
       durationMs: number;
       repo: string;
       reviewRounds?: number;
+      // Same meaning as on needs_human above.
+      costAlreadyRecordedUsd?: number;
       // Plain-language summary from the close-report turn, shown in the closing
       // Telegram message in place of a bare "closed, here's the MR". Absent if
       // CLOSE_REPORT_ENABLED is off, the turn errored, or it came back empty.

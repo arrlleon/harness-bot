@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildAgentEnv, pickResultText } from "./claudeEngine.js";
+import { buildAgentEnv, pickResultText, callContextTokens } from "./claudeEngine.js";
 
 test("buildAgentEnv strips every harness secret, leaving everything else untouched", () => {
   const source = {
@@ -46,4 +46,16 @@ test("pickResultText falls back when result is only whitespace", () => {
 
 test("pickResultText returns empty when neither has anything to say", () => {
   assert.equal(pickResultText("", ""), "");
+});
+
+// Reproduced live (XEN-540): the result event's usage is summed across every API call
+// in a turn (8783k for a turn whose real context peaked at 187k) — context size has to
+// come from one call's own usage instead.
+test("callContextTokens sums one API call's input, cache_read and cache_creation", () => {
+  assert.equal(callContextTokens({ input_tokens: 10, cache_read_input_tokens: 14959, cache_creation_input_tokens: 8189, output_tokens: 4 }), 23158);
+});
+
+test("callContextTokens is 0 for a missing or all-zero (synthetic message) usage", () => {
+  assert.equal(callContextTokens(undefined), 0);
+  assert.equal(callContextTokens({ input_tokens: 0, output_tokens: 0 }), 0);
 });

@@ -98,6 +98,10 @@ export interface PendingBrief {
   branchName: string;
   gitlabProjectPath: string;
   resumeState: CloseLoopResumeState;
+  // Set only when this brief was raised by a continuation of a task whose earlier
+  // needs_human record is already in history — how much of the cumulative cost that
+  // record covered (see QueueRunOutcome.costAlreadyRecordedUsd).
+  recordedCostUsd?: number;
   // Absent for a single-repo task's brief. Present for one raised during either half
   // of a cross-repo task — see CrossRepoBriefContext for what each stage carries.
   crossRepo?: CrossRepoBriefContext;

@@ -56,6 +56,16 @@ function truncate(s: string, n: number): string {
 // because resultText was empty, not because there was nothing to say. Pure and
 // exported for its own test — the rest of this file needs a real `claude` child
 // process to exercise.
+// Context size of ONE API call, from that call's own usage on a stream "assistant"
+// event. The result event's `usage` can't be used for this: the CLI sums it across
+// every API call in the turn. Reproduced live (XEN-540): a 66-call turn whose real
+// context peaked at 187k reported 8783k there, tripping CONTEXT_BUDGET_TOKENS on
+// nearly every tool-heavy turn regardless of actual context size.
+export function callContextTokens(usage: Record<string, unknown> | undefined): number {
+  if (!usage) return 0;
+  return Number(usage.input_tokens ?? 0) + Number(usage.cache_read_input_tokens ?? 0) + Number(usage.cache_creation_input_tokens ?? 0);
+}
+
 export function pickResultText(rawResult: string, lastAssistantText: string): string {
   return rawResult.trim() || lastAssistantText;
 }
@@ -116,6 +126,7 @@ export async function runClaudeTurn(opts: RunClaudeTurnOptions): Promise<ClaudeT
   // agent_error detail (queue.ts) fell back to the bare word because resultText itself
   // was empty, not because there was nothing to say.
   let lastAssistantText = "";
+  let contextTokens = 0;
 
   await new Promise<void>((resolve, reject) => {
     const child = spawn("claude", args, { cwd: opts.cwd, env: buildAgentEnv() });
@@ -137,6 +148,10 @@ export async function runClaudeTurn(opts: RunClaudeTurnOptions): Promise<ClaudeT
       }
 
       if (event.type === "assistant") {
+        // Synthetic messages (session-limit notices etc.) carry all-zero usage — keep
+        // the last real call's number rather than resetting to 0.
+        const callTokens = callContextTokens((event.message as Record<string, unknown>)?.usage as Record<string, unknown> | undefined);
+        if (callTokens > 0) contextTokens = callTokens;
         const content = ((event.message as Record<string, unknown>)?.content ?? []) as Array<Record<string, unknown>>;
         for (const block of content) {
           if (block.type === "tool_use") {
@@ -181,6 +196,7 @@ export async function runClaudeTurn(opts: RunClaudeTurnOptions): Promise<ClaudeT
     isError: Boolean(raw.is_error),
     terminalReason: String(raw.terminal_reason ?? "unknown"),
     totalCostUsd: Number(raw.total_cost_usd ?? 0),
+    contextTokens,
     usage: {
       inputTokens: Number(usage.input_tokens ?? 0),
       outputTokens: Number(usage.output_tokens ?? 0),

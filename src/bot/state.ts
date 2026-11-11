@@ -51,20 +51,33 @@ export function recordTask(state: BotState, record: TaskRecord): void {
   saveState(state);
 }
 
-// Shared by the proposal-confirm flow and the dashboard's manual-start path —
-// both end up with a QueueRunOutcome and need the same bookkeeping.
-export function recordOutcome(state: BotState, outcome: QueueRunOutcome): void {
-  if (outcome.kind !== "closed" && outcome.kind !== "needs_human" && outcome.kind !== "skipped") return;
-  recordTask(state, {
+// Pure half of recordOutcome below, split out so the cost arithmetic is testable
+// without writing to the real bot-state.json. Returns null for outcomes that aren't
+// history records at all (empty/paused/busy/brief_pending).
+export function outcomeToRecord(outcome: QueueRunOutcome, timestamp: string): TaskRecord | null {
+  if (outcome.kind !== "closed" && outcome.kind !== "needs_human" && outcome.kind !== "skipped") return null;
+  const cumulative = "costUsd" in outcome ? outcome.costUsd : 0;
+  const alreadyRecorded = ("costAlreadyRecordedUsd" in outcome && outcome.costAlreadyRecordedUsd) || 0;
+  return {
     issueKey: outcome.issueKey,
     outcome: outcome.kind,
     detail: outcome.kind === "closed" ? outcome.mrUrl : outcome.reason,
-    costUsd: "costUsd" in outcome ? outcome.costUsd : 0,
+    // Increment only: a continuation's costUsd is cumulative for the whole task, and an
+    // earlier needs_human record already covers the first part of it. Reproduced live
+    // (XEN-540): without this, five records made costToday read $47 for ~$25 spent.
+    costUsd: Math.max(0, cumulative - alreadyRecorded),
     durationMs: "durationMs" in outcome ? outcome.durationMs : undefined,
     repo: "repo" in outcome ? outcome.repo : undefined,
     reviewRounds: "reviewRounds" in outcome ? outcome.reviewRounds : undefined,
-    timestamp: new Date().toISOString(),
-  });
+    timestamp,
+  };
+}
+
+// Shared by the proposal-confirm flow and the dashboard's manual-start path —
+// both end up with a QueueRunOutcome and need the same bookkeeping.
+export function recordOutcome(state: BotState, outcome: QueueRunOutcome): void {
+  const record = outcomeToRecord(outcome, new Date().toISOString());
+  if (record) recordTask(state, record);
 }
 
 export interface CostEstimate {

@@ -1,5 +1,4 @@
 import type {
-  ClaudeTurnUsage,
   CloseLoopIteration,
   CloseLoopResult,
   EngineConfig,
@@ -21,14 +20,6 @@ import { generateCloseReport } from "./closeReport.js";
 import { checkGateIntegrity } from "./gateIntegrity.js";
 import { writeTaskContext } from "./agentContext.js";
 import { parseBrief } from "./brief.js";
-
-// input + cache_read + cache_creation is the real total context the model saw this
-// turn, not a per-turn delta — confirmed empirically elsewhere (a turn can report
-// input_tokens in the single digits while the real context is in the tens of
-// thousands, almost all of it served from cache).
-export function totalContextTokens(usage: ClaudeTurnUsage): number {
-  return usage.inputTokens + usage.cacheReadInputTokens + usage.cacheCreationInputTokens;
-}
 
 // True when a resumed review-fix brief can no longer be safely processed by the normal
 // loop below: review got disabled, or MAX_REVIEW_ROUNDS was lowered below the round
@@ -584,7 +575,7 @@ export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promis
     // the current diff instead of `--resume`'s conversation history — a real, known
     // tradeoff (that session won't know what this one already tried), which is exactly
     // why it's never automatic.
-    const contextTokens = totalContextTokens(turn.usage);
+    const contextTokens = turn.contextTokens;
     if (config.maxContextTokens && contextTokens >= config.maxContextTokens) {
       return {
         task,
@@ -619,6 +610,7 @@ export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promis
           // call it stuck on turn one.
           previousFingerprint: undefined,
           freshSession: true,
+          failedGates: verify.gates.filter((g) => !g.passed).map((g) => ({ ...g, output: g.output.slice(0, 4000) })),
         },
       };
     }

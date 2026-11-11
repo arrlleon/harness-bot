@@ -11,6 +11,7 @@ function turn(partial: Partial<ClaudeTurnResult>): ClaudeTurnResult {
     isError: false,
     terminalReason: "end_turn",
     totalCostUsd: 0,
+    contextTokens: 0,
     usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
     ...partial,
   };
@@ -112,8 +113,32 @@ test("buildFailureReason lists every gate-integrity violation", () => {
 });
 
 test("buildFailureReason reports the measured token count for 'context_budget'", () => {
-  const result = closeLoopResult({ stopReason: "context_budget", contextTokens: 1873421 });
-  assert.match(buildFailureReason(result), /~1873k tokens/);
+  const result = closeLoopResult({ stopReason: "context_budget", contextTokens: 187269 });
+  assert.match(buildFailureReason(result), /~187k токенов/);
+  assert.doesNotMatch(buildFailureReason(result), /не прошли гейты/);
+});
+
+// Reproduced live (XEN-540): the stopped turn's gates had caught a real tsc error, but
+// only the token count reached the human — the reason now at least names which gates.
+test("buildFailureReason names the gates that were failing at a 'context_budget' stop", () => {
+  const result = closeLoopResult({
+    stopReason: "context_budget",
+    contextTokens: 187269,
+    resumeState: {
+      sessionId: "s1",
+      worktreeDir: "/tmp/x",
+      iteration: 0,
+      totalCostUsd: 1,
+      gates: [],
+      baselines: [],
+      freshSession: true,
+      failedGates: [
+        { name: "typecheck", command: "tsc", passed: false, output: "error TS1005" },
+        { name: "test", command: "jest", passed: false, output: "1 failed" },
+      ],
+    },
+  });
+  assert.match(buildFailureReason(result), /не прошли гейты: typecheck, test/);
 });
 
 test("buildFailureReason includes the raw conflict output for 'rebase_conflict'", () => {

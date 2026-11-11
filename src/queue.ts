@@ -3,7 +3,7 @@ import { JiraClient, type JiraIssue } from "./jira/client.js";
 import { detectRepo, toTaskSpec, retagTitle, type RepoDetection } from "./jira/mapToTask.js";
 import { runCloseLoop } from "./engine/loop.js";
 import { buildBriefAnswerPrompt } from "./engine/brief.js";
-import { buildContinuationPrompt } from "./engine/prompts.js";
+import { buildContinuationPrompt, buildInterruptedResumePrompt } from "./engine/prompts.js";
 import { runClaudeTurn } from "./engine/claudeEngine.js";
 import { parseProposalResponse, parseWrongRepoSignal } from "./engine/proposal.js";
 import { readMemoryFiles, buildMemoryContextBlock } from "./engine/memory.js";
@@ -611,7 +611,8 @@ export function buildFailureReason(result: CloseLoopResult): string {
     return `gate_integrity_violation: ${result.gateIntegrityViolations.join("; ")}`;
   }
   if (result.stopReason === "context_budget" && result.contextTokens) {
-    return `context_budget: session reached ~${Math.round(result.contextTokens / 1000)}k tokens, stopped before quality degrades further`;
+    const failing = result.resumeState?.failedGates?.map((g) => g.name).join(", ");
+    return `context_budget: контекст сессии ~${Math.round(result.contextTokens / 1000)}k токенов${failing ? `, не прошли гейты: ${failing}` : ""}`;
   }
   if (result.stopReason === "rebase_conflict" && result.rebaseConflictOutput) {
     return `rebase_conflict (dev moved on while this was paused, and the two don't merge cleanly): ${result.rebaseConflictOutput.slice(0, 1000)}`;
@@ -1286,12 +1287,25 @@ export async function continueNeedsHuman(): Promise<QueueRunOutcome | null> {
   startJob(pending.issueKey, pending.title, pending.description, pending.gitlabProjectPath, config.maxIterations);
   const startedAt = Date.now();
   try {
-    const diff = await getWorktreeDiff(pending.resumeState.worktreeDir, config.gitlab.targetBranch);
-    const prompt = buildContinuationPrompt(task, diff.slice(0, MAX_CONTINUATION_DIFF_CHARS));
-    const outcome = await closeLoopAndPush(issue, repo, task, pending.branchName, { ...pending.resumeState, prompt });
+    const resumeState = pending.resumeState;
+    // A fresh session knows nothing — replay the diff plus whatever the stopped
+    // session's own gates last said. A same-session resume (agent_error) already has
+    // all of that in its history.
+    const prompt = resumeState.freshSession
+      ? buildContinuationPrompt(
+          task,
+          (await getWorktreeDiff(resumeState.worktreeDir, config.gitlab.targetBranch)).slice(0, MAX_CONTINUATION_DIFF_CHARS),
+          config.briefsEnabled,
+          resumeState.failedGates,
+        )
+      : buildInterruptedResumePrompt();
+    const outcome = await closeLoopAndPush(issue, repo, task, pending.branchName, { ...resumeState, prompt });
     const jobOutcome = await handleCloseLoopOutcome(jira, issue, repo, task, pending.branchName, outcome);
+    // pending.costUsd is exactly what the needs_human record that led here already put
+    // into history — see costAlreadyRecordedUsd's own comment (types.ts).
+    if (jobOutcome.kind === "brief_pending") carryRecordedCost(pending.costUsd);
     if (jobOutcome.kind === "closed" || jobOutcome.kind === "needs_human") {
-      return { ...jobOutcome, durationMs: Date.now() - startedAt, repo: pending.gitlabProjectPath };
+      return { ...jobOutcome, durationMs: Date.now() - startedAt, repo: pending.gitlabProjectPath, costAlreadyRecordedUsd: pending.costUsd };
     }
     return jobOutcome;
   } finally {
@@ -1351,16 +1365,31 @@ export async function resolveBrief(chosenIndex: number): Promise<QueueRunOutcome
       jobOutcome = await handleCloseLoopOutcome(jira, issue, repo, pending.task, pending.branchName, outcome);
     }
 
+    const alreadyRecorded = pending.recordedCostUsd ?? 0;
+    if (jobOutcome.kind === "brief_pending") carryRecordedCost(alreadyRecorded);
     if (jobOutcome.kind === "closed" || jobOutcome.kind === "needs_human") {
       // "cross" matches the repo tag a cross-repo task's own first attempt reports
       // (dispatchIssue) — /metrics groups by this field, and a half's own gitlabProjectPath
       // would misrepresent a cross-repo task as single-repo.
-      return { ...jobOutcome, durationMs: Date.now() - startedAt, repo: pending.crossRepo ? "cross" : pending.gitlabProjectPath };
+      return {
+        ...jobOutcome,
+        durationMs: Date.now() - startedAt,
+        repo: pending.crossRepo ? "cross" : pending.gitlabProjectPath,
+        costAlreadyRecordedUsd: alreadyRecorded || undefined,
+      };
     }
     return jobOutcome;
   } finally {
     finishJob();
   }
+}
+
+// A continuation that pauses on a brief hasn't recorded anything new yet — the amount
+// already in history has to ride along on the pending brief, or resolveBrief's eventual
+// outcome would record the whole cumulative cost a second time.
+function carryRecordedCost(recordedCostUsd: number): void {
+  const next = getLiveState().pendingBrief;
+  if (next && recordedCostUsd > 0) setPendingBrief({ ...next, recordedCostUsd });
 }
 
 export async function getPendingHumanReviewDiff(): Promise<string | null> {

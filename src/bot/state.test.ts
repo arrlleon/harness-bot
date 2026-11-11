@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { estimateCost, computeMetrics, type BotState, type TaskRecord } from "./state.js";
+import { estimateCost, computeMetrics, outcomeToRecord, type BotState, type TaskRecord } from "./state.js";
 
 function record(partial: Partial<TaskRecord> & { issueKey: string }): TaskRecord {
   return {
@@ -157,4 +157,34 @@ test("computeMetrics breaks totals down per repo, grouping anything unlabeled un
   assert.deepEqual(metrics?.byRepo.backend, { total: 2, closed: 1, needsHuman: 1 });
   assert.deepEqual(metrics?.byRepo.frontend, { total: 1, closed: 1, needsHuman: 0 });
   assert.deepEqual(metrics?.byRepo.unknown, { total: 1, closed: 1, needsHuman: 0 });
+});
+
+// Reproduced live (XEN-540): each continuation reports the task's CUMULATIVE cost, and
+// every one of them was written to history whole — 10.14, 10.23, 13.02, 16.97, 19.50 —
+// so costToday read $47 for ~$25 of real spend and the daily cap tripped falsely.
+test("outcomeToRecord stores only the increment when part of the cost is already in history", () => {
+  const record = outcomeToRecord(
+    { kind: "needs_human", issueKey: "XEN-540", costUsd: 13.02, reason: "context_budget", worktreeDir: "/w", branchName: "b", durationMs: 1, repo: "r", costAlreadyRecordedUsd: 10.23 },
+    "2026-11-10T00:00:00.000Z",
+  );
+  assert.ok(record);
+  assert.ok(Math.abs(record.costUsd - 2.79) < 1e-9);
+});
+
+test("outcomeToRecord stores the full cost for a first attempt (nothing recorded before)", () => {
+  const record = outcomeToRecord(
+    { kind: "closed", issueKey: "XEN-1", costUsd: 3.5, mrUrl: "https://x/mr/1", durationMs: 1, repo: "r" },
+    "2026-11-10T00:00:00.000Z",
+  );
+  assert.equal(record?.costUsd, 3.5);
+  assert.equal(record?.detail, "https://x/mr/1");
+});
+
+test("outcomeToRecord never goes negative and skips non-record outcomes", () => {
+  const record = outcomeToRecord(
+    { kind: "needs_human", issueKey: "XEN-2", costUsd: 1, reason: "stuck", worktreeDir: "/w", branchName: "b", durationMs: 1, repo: "r", costAlreadyRecordedUsd: 5 },
+    "2026-11-10T00:00:00.000Z",
+  );
+  assert.equal(record?.costUsd, 0);
+  assert.equal(outcomeToRecord({ kind: "brief_pending", issueKey: "XEN-3" }, "t"), null);
 });

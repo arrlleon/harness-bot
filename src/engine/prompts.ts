@@ -30,8 +30,20 @@ export function buildInitialPrompt(task: TaskSpec, memoryContext = "", briefsEna
 // prior work, and leads with it being INCOMPLETE (stopped on a budget limit, not
 // because it was finished) so the model reads/verifies before assuming it just needs
 // polish.
-export function buildContinuationPrompt(task: TaskSpec, diff: string, briefsEnabled = true): string {
+export function buildContinuationPrompt(task: TaskSpec, diff: string, briefsEnabled = true, failedGates: GateResult[] = []): string {
   const criteria = task.acceptanceCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n");
+  // Concrete failures first, when there are any: reproduced live (XEN-540) that "review
+  // everything against every criterion" alone sent three fresh sessions in a row into
+  // a full re-review that never reached the one line the compiler had already flagged.
+  const gateSection = failedGates.length
+    ? [
+        "",
+        "The stopped session's last verification run FAILED on the gates below. This is",
+        "real tool output, not a guess — fix these first, before any broader re-review:",
+        "",
+        ...failedGates.map((g) => `### ${g.name} (\`${g.command}\`) failed\n\n\`\`\`\n${g.output.slice(0, 4000)}\n\`\`\``),
+      ]
+    : [];
   return [
     `Task ${task.id}: ${task.title}`,
     "",
@@ -49,6 +61,7 @@ export function buildContinuationPrompt(task: TaskSpec, diff: string, briefsEnab
     "```diff",
     diff,
     "```",
+    ...gateSection,
     "",
     "Review what's already there against the acceptance criteria above — it may be",
     "incomplete, or partway through an approach worth reconsidering — then finish the",
@@ -57,6 +70,19 @@ export function buildContinuationPrompt(task: TaskSpec, diff: string, briefsEnab
     "to run commands; a separate process will run tests and commit your changes. Stop",
     "once the files are correct.",
     briefsEnabled ? `\n${buildBriefInstructions()}` : "",
+  ].join("\n");
+}
+
+// For resuming the SAME session (`--resume`) after an agent_error — an account session
+// limit, a per-turn budget cutoff, a CLI crash. The session still has its own history,
+// so unlike buildContinuationPrompt there's no diff to replay and nothing to re-explain;
+// telling it "you are a fresh session" here would be false.
+export function buildInterruptedResumePrompt(): string {
+  return [
+    "Your previous turn on this task was interrupted before it finished (a usage limit,",
+    "a budget cutoff, or a tool error) — not because the work was complete or verified.",
+    "Continue exactly where you stopped: finish the implementation by editing files",
+    "directly, then stop. A separate process runs the gates and commits your changes.",
   ].join("\n");
 }
 
