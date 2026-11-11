@@ -159,10 +159,10 @@ test("a gate that runs out of memory throws GateInfraError instead of recording 
 });
 
 test("classifyCrash recognises timeout, buffer overflow and OOM, and nothing else", () => {
-  assert.match(classifyCrash({ killed: true, signal: "SIGKILL" }, "", 60_000) ?? "", /не завершился/);
-  assert.match(classifyCrash({ code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" }, "", 60_000) ?? "", /буфера/);
-  assert.match(classifyCrash({ code: 134 }, "JavaScript heap out of memory", 60_000) ?? "", /памяти/);
-  assert.equal(classifyCrash({ code: 1 }, "src/a.ts(1,1): error TS1005: ',' expected.", 60_000), undefined);
+  assert.match(classifyCrash({ timedOut: true, signal: "SIGKILL" }, "", 60_000) ?? "", /не завершился/);
+  assert.match(classifyCrash({ signal: "SIGTERM" }, "", 60_000) ?? "", /\/kill/);
+  assert.match(classifyCrash({}, "JavaScript heap out of memory", 60_000) ?? "", /памяти/);
+  assert.equal(classifyCrash({}, "src/a.ts(1,1): error TS1005: ',' expected.", 60_000), undefined);
 });
 
 test("compareGate fails a gate whose baseline was countable but whose current output isn't", () => {
@@ -187,4 +187,17 @@ test("gateEnv strips harness secrets and raises the Node heap without clobbering
   assert.equal(env.GITLAB_TOKEN, undefined);
   assert.match(env.NODE_OPTIONS ?? "", /--enable-source-maps --max-old-space-size=\d+/);
   assert.equal(gateEnv({ NODE_OPTIONS: "--max-old-space-size=8192" }).NODE_OPTIONS, "--max-old-space-size=8192");
+});
+
+// A gate is `sh -c "<command>"`: the old exec-based runner's timeout only ever killed
+// that wrapper shell, leaving the real work (jest and its workers) running.
+test("a gate that outlives GATE_TIMEOUT_MS is killed with its whole process group and reported as infra failure", async () => {
+  process.env.GATE_TIMEOUT_MS = "300";
+  try {
+    const started = Date.now();
+    await assert.rejects(() => runGates(".", [{ name: "test", command: "sleep 30 & wait" }], []), /не завершился/);
+    assert.ok(Date.now() - started < 5000, "the gate should have been cut off at the timeout, twice at most");
+  } finally {
+    delete process.env.GATE_TIMEOUT_MS;
+  }
 });

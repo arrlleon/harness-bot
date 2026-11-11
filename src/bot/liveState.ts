@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CostEstimate } from "./state.js";
@@ -155,7 +155,9 @@ function persistPending(): void {
     pendingBrief: state.pendingBrief,
   };
   mkdirSync(dirname(PENDING_STATE_PATH), { recursive: true });
-  writeFileSync(PENDING_STATE_PATH, JSON.stringify(payload, null, 2));
+  const tmp = `${PENDING_STATE_PATH}.tmp`;
+  writeFileSync(tmp, JSON.stringify(payload, null, 2));
+  renameSync(tmp, PENDING_STATE_PATH);
 }
 
 // Called once at bot startup, before any command can run, so a restored
@@ -169,8 +171,16 @@ export function loadPersistedPending(): PersistedPending {
     state.pendingApproval = parsed.pendingApproval ?? null;
     state.pendingHumanReview = parsed.pendingHumanReview ?? null;
     state.pendingBrief = parsed.pendingBrief ?? null;
-  } catch {
-    // Corrupt or half-written file — start clean rather than crash the bot over it.
+  } catch (err) {
+    // Corrupt file — start clean rather than crash the bot over it, but keep the
+    // evidence: this file is the only record of a task waiting on a human.
+    const aside = `${PENDING_STATE_PATH}.corrupt-${Date.now()}`;
+    try {
+      renameSync(PENDING_STATE_PATH, aside);
+    } catch {
+      // nothing more to do
+    }
+    console.error(`[state] pending-state.json не читается (${(err as Error).message}) — отложен как ${aside}`);
   }
   return { pendingApproval: state.pendingApproval, pendingHumanReview: state.pendingHumanReview, pendingBrief: state.pendingBrief };
 }

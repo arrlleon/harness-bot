@@ -7,7 +7,7 @@ import { buildContinuationPrompt, buildInterruptedResumePrompt } from "./engine/
 import { runClaudeTurn } from "./engine/claudeEngine.js";
 import { parseProposalResponse, parseWrongRepoSignal } from "./engine/proposal.js";
 import { readMemoryFiles, buildMemoryContextBlock } from "./engine/memory.js";
-import { createMergeRequest, pushBranch } from "./gitlab.js";
+import { createMergeRequest, deleteRemoteBranch, pushBranch } from "./gitlab.js";
 import {
   startJob,
   updateJob,
@@ -21,6 +21,7 @@ import {
   clearPendingHumanReview,
   setPendingBrief,
   clearPendingBrief,
+  type PendingHumanReview,
 } from "./bot/liveState.js";
 import { commitAll, deleteBranch, getWorktreeDiff, removeWorktree, worktreeDirFor } from "./engine/git.js";
 import { buildWorkReportDocument, workReportFilename } from "./engine/workReport.js";
@@ -29,6 +30,7 @@ import { generateCloseReport } from "./engine/closeReport.js";
 import { writeCheckpoint, clearCheckpoint } from "./engine/checkpoint.js";
 import { loadState, costSince, countSince, startOfTodayIso, estimateCost, type CostEstimate } from "./bot/state.js";
 import type { CloseLoopResult, EngineConfig, GateSpec, QueueRunOutcome, TaskSpec } from "./types.js";
+import { existsSync } from "node:fs";
 
 // What runJob itself can determine — it has no notion of elapsed wall-clock time or
 // which repo was targeted (that's dispatchIssue's job, wrapping the call). Same shape
@@ -41,6 +43,63 @@ type JobOutcome =
   | { kind: "needs_human"; issueKey: string; costUsd: number; reason: string; worktreeDir: string; branchName: string; reviewRounds?: number }
   | { kind: "closed"; issueKey: string; costUsd: number; mrUrl: string; reviewRounds?: number; report?: string }
   | { kind: "brief_pending"; issueKey: string };
+
+// Jira is bookkeeping around the real work, never a reason to lose it. A comment or
+// status change that fails (Jira down, a workflow with no such transition, an expired
+// token) used to throw out of the middle of a flow — after the MR was already open but
+// before the outcome was recorded, or before a needs_human review was even saved —
+// leaving a worktree nobody was told about. Logged and carried on from instead.
+async function safeComment(jira: JiraClient, issueKey: string, body: string): Promise<void> {
+  try {
+    await jira.addComment(issueKey, body);
+  } catch (err) {
+    appendLog(`⚠️ Не удалось оставить комментарий в ${issueKey}: ${(err as Error).message}`);
+    console.error(`[jira] comment on ${issueKey} failed:`, (err as Error).message);
+  }
+}
+
+async function safeTransition(jira: JiraClient, issueKey: string, status: string): Promise<void> {
+  try {
+    await jira.transitionTo(issueKey, status);
+  } catch (err) {
+    appendLog(`⚠️ Не удалось перевести ${issueKey} в «${status}»: ${(err as Error).message}`);
+    console.error(`[jira] transition of ${issueKey} to ${status} failed:`, (err as Error).message);
+  }
+}
+
+// Last line of defence for anything that throws once a task's worktree exists (a
+// killed turn, a gate that couldn't run, a git failure): the work on disk becomes a
+// needs_human review a person can accept or reject, instead of an error message and an
+// orphaned worktree that only a bot restart would ever surface. Rethrows when there's
+// no worktree — nothing was started, so there's nothing to hand over.
+async function escalateFailure(
+  jira: JiraClient,
+  issue: { key: string; summary: string },
+  gitlabProjectPath: string,
+  task: TaskSpec,
+  branchName: string,
+  err: unknown,
+): Promise<JobOutcome> {
+  const worktreeDir = worktreeDirFor(branchName);
+  if (!existsSync(worktreeDir)) throw err;
+  const message = (err as Error)?.message ?? String(err);
+  const reason = /killed by SIG|\/kill/.test(message) ? "остановлено вручную (/kill)" : `сбой харнесса: ${message.slice(0, 300)}`;
+  const costUsd = getLiveState().currentJob?.costUsd ?? 0;
+  setPendingHumanReview({
+    issueKey: issue.key,
+    title: issue.summary,
+    reason,
+    costUsd,
+    worktreeDir,
+    branchName,
+    gitlabProjectPath,
+    description: task.description,
+    acceptanceCriteria: task.acceptanceCriteria,
+  });
+  clearCheckpoint(issue.key);
+  await safeComment(jira, issue.key, `jira-harness: работа прервана (${reason}). Рабочее дерево сохранено: ${worktreeDir}. Ждёт решения человека.`);
+  return { kind: "needs_human", issueKey: issue.key, costUsd, reason, worktreeDir, branchName };
+}
 
 const QUEUE_JQL = () =>
   `project = ${config.jira.projectKey} AND assignee = currentUser() AND statusCategory = "To Do" ORDER BY priority DESC`;
@@ -81,7 +140,7 @@ export async function peekNext(): Promise<Candidate | null> {
 
 export async function retryIssue(issueKey: string): Promise<void> {
   const jira = new JiraClient(config.jira.baseUrl, config.jira.token);
-  await jira.transitionTo(issueKey, config.jira.todoStatus);
+  await safeTransition(jira, issueKey, config.jira.todoStatus);
 }
 
 export interface Proposal {
@@ -234,7 +293,7 @@ async function proposeIssue(
   if (detection.kind === "unknown") {
     const reason = "no [backend]/[frontend]/[web] prefix in title or description";
     declinedKeys.add(issue.key); // can't route it regardless of approval; no point re-surfacing
-    await jira.addComment(
+    await safeComment(jira, 
       issue.key,
       `jira-harness: could not determine a single target repository (${reason}). Skipped — left in To Do.`,
     );
@@ -245,7 +304,7 @@ async function proposeIssue(
     if (!config.repos.backend.path || !config.repos.frontend.path) {
       const reason = "cross-repo ticket but BACKEND_REPO_PATH/FRONTEND_REPO_PATH aren't both configured";
       declinedKeys.add(issue.key);
-      await jira.addComment(issue.key, `jira-harness: ${reason}. Skipped — left in To Do.`);
+      await safeComment(jira, issue.key, `jira-harness: ${reason}. Skipped — left in To Do.`);
       return { kind: "skipped", issueKey: issue.key, reason };
     }
 
@@ -307,7 +366,7 @@ async function proposeIssue(
   if (result.wrongRepo && result.wrongRepo !== repoKind && config.repos[result.wrongRepo].path) {
     const correctedTitle = retagTitle(issue.summary, result.wrongRepo);
     await jira.updateSummary(issue.key, correctedTitle);
-    await jira.addComment(
+    await safeComment(jira, 
       issue.key,
       `jira-harness: при анализе выяснилось, что фикс нужен в ${result.wrongRepo}, а не ${repoKind} — поменял тег в заголовке и беру в работу ${result.wrongRepo}.`,
     );
@@ -433,7 +492,22 @@ export async function confirmPending(): Promise<QueueRunOutcome | null> {
 
   const jira = new JiraClient(config.jira.baseUrl, config.jira.token);
   const issue: JiraIssue = { key: pending.issueKey, summary: pending.title, description: pending.description };
-  const outcome = await dispatchIssue(jira, issue, pending.acceptanceCriteria);
+  let outcome: QueueRunOutcome;
+  try {
+    outcome = await dispatchIssue(jira, issue, pending.acceptanceCriteria);
+  } catch (err) {
+    // Threw before any work existed to hand over (escalateFailure covers the rest).
+    // The approved proposal — and the analysis already paid for — goes back as it was,
+    // so "Подтвердить" can simply be pressed again once whatever broke is fixed.
+    const live = getLiveState();
+    if (!live.pendingApproval && !live.pendingHumanReview && !live.pendingBrief) setPendingApproval(pending);
+    throw err;
+  }
+  // "busy" means it never started — same reasoning.
+  if (outcome.kind === "busy") {
+    if (!getLiveState().pendingApproval) setPendingApproval(pending);
+    return outcome;
+  }
   // Fold the analysis turn's own cost into whatever gets recorded, so it
   // still counts against the daily budget instead of being invisible spend.
   if (outcome.kind === "closed" || outcome.kind === "needs_human") {
@@ -461,15 +535,17 @@ export function cancelPending(): Proposal | null {
   };
 }
 
-function checkDailyCaps(): { kind: "paused"; reason: string } | null {
+// budgetOnly: for continuing a task that's already counted — the money cap still
+// applies, the tasks-per-day cap is about starting new ones.
+function checkDailyCaps(opts: { budgetOnly?: boolean } = {}): { kind: "paused"; reason: string } | null {
   const persisted = loadState();
   const todayIso = startOfTodayIso();
   const spentToday = costSince(persisted, todayIso);
   const tasksToday = countSince(persisted, todayIso);
   if (spentToday >= config.dailyBudgetUsd) {
-    return { kind: "paused", reason: `daily budget reached ($${spentToday.toFixed(2)}/$${config.dailyBudgetUsd})` };
+    return { kind: "paused", reason: `дневной бюджет исчерпан ($${spentToday.toFixed(2)} из $${config.dailyBudgetUsd}) — подними DAILY_BUDGET_USD или дождись завтра` };
   }
-  if (tasksToday >= config.maxTasksPerDay) {
+  if (!opts.budgetOnly && tasksToday >= config.maxTasksPerDay) {
     return { kind: "paused", reason: `daily task cap reached (${tasksToday}/${config.maxTasksPerDay})` };
   }
   return null;
@@ -497,7 +573,7 @@ async function dispatchIssue(jira: JiraClient, issue: JiraIssue, acceptanceCrite
   const detection = detectRepo(issue);
   if (detection.kind === "unknown") {
     const reason = "no [backend]/[frontend]/[web] prefix in title or description";
-    await jira.addComment(
+    await safeComment(jira, 
       issue.key,
       `jira-harness: could not determine target repository (${reason}). Skipped — left in To Do.`,
     );
@@ -508,7 +584,7 @@ async function dispatchIssue(jira: JiraClient, issue: JiraIssue, acceptanceCrite
     const frontendRepo = config.repos.frontend;
     if (!backendRepo.path || !frontendRepo.path) {
       const reason = "cross-repo ticket but BACKEND_REPO_PATH/FRONTEND_REPO_PATH aren't both configured";
-      await jira.addComment(issue.key, `jira-harness: ${reason}. Left in To Do.`);
+      await safeComment(jira, issue.key, `jira-harness: ${reason}. Left in To Do.`);
       return { kind: "skipped", issueKey: issue.key, reason };
     }
 
@@ -521,12 +597,21 @@ async function dispatchIssue(jira: JiraClient, issue: JiraIssue, acceptanceCrite
     startJob(issue.key, issue.summary, issue.description, "cross", config.maxIterations);
     const crossStartedAt = Date.now();
     try {
-      const outcome = await runCrossRepoJob(
-        jira,
-        issue,
-        { task: backendTask, repo: backendRepo, branchName: backendBranch },
-        { task: frontendTask, repo: frontendRepo, branchName: frontendBranch },
-      );
+      let outcome: JobOutcome;
+      try {
+        outcome = await runCrossRepoJob(
+          jira,
+          issue,
+          { task: backendTask, repo: backendRepo, branchName: backendBranch },
+          { task: frontendTask, repo: frontendRepo, branchName: frontendBranch },
+        );
+      } catch (err) {
+        // Whichever half was in flight: the frontend worktree only exists once the
+        // backend half is already pushed.
+        outcome = existsSync(worktreeDirFor(frontendBranch))
+          ? await escalateFailure(jira, issue, frontendRepo.gitlabProjectPath, frontendTask, frontendBranch, err)
+          : await escalateFailure(jira, issue, backendRepo.gitlabProjectPath, backendTask, backendBranch, err);
+      }
       if (outcome.kind === "closed" || outcome.kind === "needs_human") {
         return { ...outcome, durationMs: Date.now() - crossStartedAt, repo: "cross" };
       }
@@ -754,10 +839,14 @@ async function runJob(
   branchName: string,
 ): Promise<JobOutcome> {
   updateJob({ phase: "transitioning" });
-  await jira.transitionTo(issue.key, config.jira.inProgressStatus);
+  await safeTransition(jira, issue.key, config.jira.inProgressStatus);
 
-  const outcome = await closeLoopAndPush(issue, repo, task, branchName);
-  return handleCloseLoopOutcome(jira, issue, repo, task, branchName, outcome);
+  try {
+    const outcome = await closeLoopAndPush(issue, repo, task, branchName);
+    return await handleCloseLoopOutcome(jira, issue, repo, task, branchName, outcome);
+  } catch (err) {
+    return escalateFailure(jira, issue, repo.gitlabProjectPath, task, branchName, err);
+  }
 }
 
 // Shared by runJob's first attempt and resolveBrief's resumed attempt — a resumed
@@ -775,7 +864,7 @@ export async function handleCloseLoopOutcome(
   const result = outcome.closeLoopResult;
 
   if (outcome.briefPending) {
-    await jira.addComment(
+    await safeComment(jira, 
       issue.key,
       `jira-harness: вопрос перед продолжением работы — см. Telegram.\n«${result.brief!.question}»`,
     );
@@ -810,7 +899,7 @@ export async function handleCloseLoopOutcome(
               `worktree left at: ${result.worktreeDir}`,
               "Left in-progress for a human to look at.",
             ].join("\n");
-    await jira.addComment(issue.key, message);
+    await safeComment(jira, issue.key, message);
     setPendingHumanReview({
       issueKey: issue.key,
       title: issue.summary,
@@ -840,12 +929,12 @@ export async function handleCloseLoopOutcome(
   }
 
   updateJob({ phase: "commenting" });
-  await jira.addComment(
+  await safeComment(jira, 
     issue.key,
     `jira-harness opened ${outcome.mrUrl} (cost: $${result.totalCostUsd.toFixed(4)})${testingNotesSection(result.testingNotes)}`,
   );
   await attachWorkReport(jira, issue, task, { closeReport: result.closeReport, testingNotes: result.testingNotes });
-  await jira.transitionTo(issue.key, config.jira.reviewStatus);
+  await safeTransition(jira, issue.key, config.jira.reviewStatus);
   await cleanupWorktree(repo.path, result.worktreeDir, branchName);
   clearCheckpoint(issue.key);
   return {
@@ -957,7 +1046,7 @@ async function runCrossRepoJob(
   frontend: { task: TaskSpec; repo: RepoHandle; branchName: string },
 ): Promise<JobOutcome> {
   updateJob({ phase: "transitioning" });
-  await jira.transitionTo(issue.key, config.jira.inProgressStatus);
+  await safeTransition(jira, issue.key, config.jira.inProgressStatus);
 
   const backendOutcome = await closeLoopAndPush(issue, backend.repo, backend.task, backend.branchName);
   return afterBackendAttempt(jira, issue, backend, frontend, backendOutcome);
@@ -980,7 +1069,7 @@ async function afterBackendAttempt(
     // One-click, same shape as a single-repo brief: paused on the backend's own
     // session, resolveBrief resumes it with the chosen answer and continues into the
     // frontend half exactly as a first attempt would (see CrossRepoBriefContext).
-    await jira.addComment(
+    await safeComment(jira, 
       issue.key,
       `jira-harness (cross-repo): вопрос от бэкенда — см. Telegram.\n«${backendResult.brief!.question}»`,
     );
@@ -1006,7 +1095,7 @@ async function afterBackendAttempt(
 
   if (backendOutcome.failureKind) {
     const reason = `backend: ${backendOutcome.failureReason}`;
-    await jira.addComment(
+    await safeComment(jira, 
       issue.key,
       [
         `jira-harness (cross-repo): backend half did not close — ${backendOutcome.failureReason}`,
@@ -1106,7 +1195,7 @@ async function afterFrontendAttempt(
   const totalCostUsd = backendInfo.totalCostUsd + frontendResult.totalCostUsd;
 
   if (frontendOutcome.briefPending) {
-    await jira.addComment(
+    await safeComment(jira, 
       issue.key,
       `jira-harness (cross-repo): backend done — ${backendInfo.mrUrl}\nвопрос от фронтенда — см. Telegram.\n«${frontendResult.brief!.question}»`,
     );
@@ -1134,7 +1223,7 @@ async function afterFrontendAttempt(
 
   if (frontendOutcome.failureKind) {
     const reason = `frontend: ${frontendOutcome.failureReason} (backend already opened: ${backendInfo.mrUrl})`;
-    await jira.addComment(
+    await safeComment(jira, 
       issue.key,
       [
         `jira-harness (cross-repo): backend done — ${backendInfo.mrUrl}`,
@@ -1185,7 +1274,7 @@ async function afterFrontendAttempt(
   const crossRepoReport = [backendInfo.closeReport, frontendResult.closeReport].filter(Boolean).join(" ");
 
   updateJob({ phase: "commenting" });
-  await jira.addComment(
+  await safeComment(jira, 
     issue.key,
     [
       "jira-harness (cross-repo) closed both halves:",
@@ -1200,7 +1289,7 @@ async function afterFrontendAttempt(
     { id: issue.key, title: issue.summary },
     { closeReport: crossRepoReport || undefined, testingNotes: crossRepoNotes || undefined },
   );
-  await jira.transitionTo(issue.key, config.jira.reviewStatus);
+  await safeTransition(jira, issue.key, config.jira.reviewStatus);
   await cleanupWorktree(frontend.repo.path, frontendResult.worktreeDir, frontend.branchName);
   clearCheckpoint(issue.key);
   return {
@@ -1217,19 +1306,38 @@ async function afterFrontendAttempt(
 // Accept: commit whatever's still uncommitted, push, open the MR, same as the
 // loop's own success path. Reject: drop the worktree and hand the ticket back to
 // To Do so it can be picked up (and retried) from /start like any other.
-export async function resolveHumanReview(accept: boolean): Promise<{ mrUrl: string } | { rejected: true } | null> {
+export async function resolveHumanReview(
+  accept: boolean,
+): Promise<{ mrUrl: string; issueKey: string; costUsd: number; repo: string } | { rejected: true } | null> {
   const pending = getLiveState().pendingHumanReview;
   if (!pending) return null;
   clearPendingHumanReview();
+  try {
+    return await resolvePendingHumanReview(pending, accept);
+  } catch (err) {
+    // A failed push or MR used to leave the review cleared: worktree on disk, no
+    // buttons, ticket stuck "in progress". Put it back exactly as it was — the same
+    // button works again once the cause is fixed.
+    if (!getLiveState().pendingHumanReview) setPendingHumanReview(pending);
+    throw err;
+  }
+}
 
+async function resolvePendingHumanReview(
+  pending: PendingHumanReview,
+  accept: boolean,
+): Promise<{ mrUrl: string; issueKey: string; costUsd: number; repo: string } | { rejected: true }> {
   const jira = new JiraClient(config.jira.baseUrl, config.jira.token);
 
   const repoPath = repoPathFor(pending.gitlabProjectPath);
 
   if (!accept) {
+    // The branch may already be on the remote (verified, pushed, then the MR failed) —
+    // left there, the next attempt at this ticket couldn't push.
+    await deleteRemoteBranch(repoPath, pending.branchName);
     await cleanupWorktree(repoPath, pending.worktreeDir, pending.branchName);
-    await jira.addComment(pending.issueKey, "jira-harness: a human reviewed the pending diff and rejected it.");
-    await jira.transitionTo(pending.issueKey, config.jira.todoStatus);
+    await safeComment(jira, pending.issueKey, "jira-harness: a human reviewed the pending diff and rejected it.");
+    await safeTransition(jira, pending.issueKey, config.jira.todoStatus);
     return { rejected: true };
   }
 
@@ -1244,19 +1352,26 @@ export async function resolveHumanReview(accept: boolean): Promise<{ mrUrl: stri
     title: `${pending.issueKey}: ${pending.title}`,
     description: `Automated by jira-harness for ${pending.issueKey}, accepted by a human after: ${pending.reason}.`,
   });
-  await jira.addComment(pending.issueKey, `jira-harness opened ${mr.webUrl} (accepted by a human after ${pending.reason})`);
+  await safeComment(jira, pending.issueKey, `jira-harness opened ${mr.webUrl} (accepted by a human after ${pending.reason})`);
   await generateAndAttachWorkReport(
     jira,
     { key: pending.issueKey, summary: pending.title },
     { id: pending.issueKey, title: pending.title, description: pending.description, acceptanceCriteria: pending.acceptanceCriteria },
     pending.worktreeDir,
   );
-  await jira.transitionTo(pending.issueKey, config.jira.reviewStatus);
+  await safeTransition(jira, pending.issueKey, config.jira.reviewStatus);
   await cleanupWorktree(repoPath, pending.worktreeDir, pending.branchName);
-  return { mrUrl: mr.webUrl };
+  return { mrUrl: mr.webUrl, issueKey: pending.issueKey, costUsd: pending.costUsd, repo: pending.gitlabProjectPath };
 }
 
-const MAX_CONTINUATION_DIFF_CHARS = 8000; // same weight class as review.ts's/cross-repo's own diff caps
+// 8000 used to be the cap — a fraction of a real multi-file task's diff, handed to a
+// session whose only knowledge of the work so far IS this diff.
+const MAX_CONTINUATION_DIFF_CHARS = 40_000;
+
+function clipDiff(diff: string): string {
+  if (diff.length <= MAX_CONTINUATION_DIFF_CHARS) return diff;
+  return `${diff.slice(0, MAX_CONTINUATION_DIFF_CHARS)}\n... (diff обрезан — остальное прочитай прямо в файлах рабочего дерева)`;
+}
 
 // A human explicitly chose to continue a context_budget needs_human with a fresh
 // session (the "🔄 Продолжить" button — see PendingHumanReview.resumeState and
@@ -1267,6 +1382,10 @@ const MAX_CONTINUATION_DIFF_CHARS = 8000; // same weight class as review.ts's/cr
 export async function continueNeedsHuman(): Promise<QueueRunOutcome | null> {
   const pending = getLiveState().pendingHumanReview;
   if (!pending?.resumeState) return null;
+  // Before anything is cleared: a continuation is a new paid session, and it used to
+  // skip the daily cap entirely (only a brand-new task's propose step checked it).
+  const paused = checkDailyCaps({ budgetOnly: true });
+  if (paused) return paused;
   clearPendingHumanReview();
 
   const jira = new JiraClient(config.jira.baseUrl, config.jira.token);
@@ -1294,7 +1413,7 @@ export async function continueNeedsHuman(): Promise<QueueRunOutcome | null> {
     const prompt = resumeState.freshSession
       ? buildContinuationPrompt(
           task,
-          (await getWorktreeDiff(resumeState.worktreeDir, config.gitlab.targetBranch)).slice(0, MAX_CONTINUATION_DIFF_CHARS),
+          clipDiff(await getWorktreeDiff(resumeState.worktreeDir, config.gitlab.targetBranch)),
           config.briefsEnabled,
           resumeState.failedGates,
         )
@@ -1308,6 +1427,24 @@ export async function continueNeedsHuman(): Promise<QueueRunOutcome | null> {
       return { ...jobOutcome, durationMs: Date.now() - startedAt, repo: pending.gitlabProjectPath, costAlreadyRecordedUsd: pending.costUsd };
     }
     return jobOutcome;
+  } catch (err) {
+    // Same contract as resolveHumanReview: whatever broke, the review comes back (with
+    // its resume state) rather than vanishing along with its buttons.
+    const live = getLiveState();
+    const reason = `${pending.reason} · продолжение не удалось: ${((err as Error)?.message ?? String(err)).slice(0, 200)}`;
+    const costUsd = Math.max(pending.costUsd, live.currentJob?.costUsd ?? 0);
+    if (!live.pendingHumanReview && !live.pendingBrief) setPendingHumanReview({ ...pending, reason, costUsd });
+    return {
+      kind: "needs_human",
+      issueKey: pending.issueKey,
+      costUsd,
+      reason,
+      worktreeDir: pending.worktreeDir,
+      branchName: pending.branchName,
+      durationMs: Date.now() - startedAt,
+      repo: pending.gitlabProjectPath,
+      costAlreadyRecordedUsd: pending.costUsd,
+    };
   } finally {
     finishJob();
   }
@@ -1322,6 +1459,8 @@ export async function continueNeedsHuman(): Promise<QueueRunOutcome | null> {
 export async function resolveBrief(chosenIndex: number): Promise<QueueRunOutcome | null> {
   const pending = getLiveState().pendingBrief;
   if (!pending) return null;
+  const paused = checkDailyCaps({ budgetOnly: true });
+  if (paused) return paused;
   clearPendingBrief();
 
   const jira = new JiraClient(config.jira.baseUrl, config.jira.token);
@@ -1379,6 +1518,11 @@ export async function resolveBrief(chosenIndex: number): Promise<QueueRunOutcome
       };
     }
     return jobOutcome;
+  } catch (err) {
+    // The question goes back as it was — answering it again is the retry.
+    const live = getLiveState();
+    if (!live.pendingBrief && !live.pendingHumanReview) setPendingBrief(pending);
+    throw err;
   } finally {
     finishJob();
   }

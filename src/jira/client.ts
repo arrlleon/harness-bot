@@ -73,6 +73,11 @@ export class JiraClient {
   }
 
   async transitionTo(issueKey: string, statusName: string): Promise<void> {
+    // Already there — the ticket menu deliberately offers "in progress" tickets too, and
+    // most workflows have no transition from a status to itself, so this used to throw
+    // right after an approved proposal had been cleared.
+    const current = (await this.request(`/rest/api/2/issue/${issueKey}?fields=status`)) as { fields: { status: { name: string } } };
+    if (current.fields.status.name.toLowerCase() === statusName.toLowerCase()) return;
     const data = (await this.request(`/rest/api/2/issue/${issueKey}/transitions`)) as {
       transitions: Array<{ id: string; name: string; to: { name: string } }>;
     };

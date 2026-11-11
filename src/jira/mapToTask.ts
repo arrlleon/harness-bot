@@ -4,14 +4,25 @@ import type { JiraIssue } from "./client.js";
 
 export type RepoDetection = { kind: RepoKind } | { kind: "ambiguous" } | { kind: "unknown" };
 
-export function detectRepo(issue: JiraIssue): RepoDetection {
-  const haystack = `${issue.summary} ${issue.description}`.toLowerCase();
+function tagsIn(text: string): RepoDetection {
+  const haystack = text.toLowerCase();
   const hasBackend = haystack.includes("[backend]");
   const hasFrontend = haystack.includes("[frontend]") || haystack.includes("[web]");
   if (hasBackend && hasFrontend) return { kind: "ambiguous" };
   if (hasBackend) return { kind: "backend" };
   if (hasFrontend) return { kind: "frontend" };
   return { kind: "unknown" };
+}
+
+// The title decides when it carries a tag at all; the description is only consulted
+// for an untagged title. They used to be read as one string, so a ticket retagged
+// `[backend]` in its title (retagTitle below only ever rewrites the title) but still
+// mentioning `[web]` somewhere in its description came back "ambiguous" at dispatch —
+// routed down the cross-repo path, where every criterion without a repo prefix is
+// dropped and both halves ran with no acceptance criteria at all.
+export function detectRepo(issue: JiraIssue): RepoDetection {
+  const fromTitle = tagsIn(issue.summary);
+  return fromTitle.kind !== "unknown" ? fromTitle : tagsIn(issue.description);
 }
 
 export function toTaskSpec(issue: JiraIssue): TaskSpec {

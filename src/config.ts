@@ -7,6 +7,19 @@ function requireEnv(name: string): string {
   return value;
 }
 
+// A typo in a numeric setting used to become NaN and silently switch the thing off:
+// `spent >= NaN` is always false, so a mistyped DAILY_BUDGET_USD removed the daily cap
+// without a word. Fail at startup instead.
+export function numberEnv(name: string, fallback: number, source: NodeJS.ProcessEnv = process.env): number {
+  const raw = source[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error(`Env var ${name} must be a non-negative number, got ${JSON.stringify(raw)}`);
+  }
+  return value;
+}
+
 export interface RepoConfig {
   path: string;
   gates: GateSpec[];
@@ -150,7 +163,7 @@ export const config = {
   // same session -> gates re-run -> reviewer looks again). Two agents that disagree
   // need a hard stop the same way MAX_ITERATIONS is one for the gate-fixing loop —
   // otherwise a pair that never agrees just burns the whole task budget arguing.
-  maxReviewRounds: Number(process.env.MAX_REVIEW_ROUNDS ?? 3),
+  maxReviewRounds: numberEnv("MAX_REVIEW_ROUNDS", 3),
   // Same shape, same default. Costs nothing extra (a brief is a different shape of the
   // SAME implement turn's response, not a separate turn) — the toggle exists for
   // debugging/rollback, same reasoning as gateIntegrityCheckEnabled.
@@ -184,26 +197,29 @@ export const config = {
   // told it can redirect, and would just write whatever plan it can for the repo it
   // was handed.
   repoRetagEnabled: (process.env.REPO_RETAG_ENABLED ?? "true") !== "false",
-  maxIterations: Number(process.env.MAX_ITERATIONS ?? 5),
-  maxBudgetUsd: Number(process.env.MAX_BUDGET_USD ?? 5),
+  maxIterations: numberEnv("MAX_ITERATIONS", 5),
+  maxBudgetUsd: numberEnv("MAX_BUDGET_USD", 5),
   // A resumed session's answer quality degrades well before this many tokens would
   // ever hit a real context-window limit — this is a quality safety net, not a window
   // ceiling. 150k matches Avengers Harness's own starting value for the same check
   // (same reasoning: min(40% of window, 150k), picked conservative over precise).
-  maxContextTokens: Number(process.env.CONTEXT_BUDGET_TOKENS ?? 150_000),
-  dailyBudgetUsd: Number(process.env.DAILY_BUDGET_USD ?? 20),
-  maxTasksPerDay: Number(process.env.MAX_TASKS_PER_DAY ?? 10),
+  maxContextTokens: numberEnv("CONTEXT_BUDGET_TOKENS", 150_000),
+  dailyBudgetUsd: numberEnv("DAILY_BUDGET_USD", 20),
+  maxTasksPerDay: numberEnv("MAX_TASKS_PER_DAY", 10),
   telegram: {
     botToken: process.env.TELEGRAM_BOT_TOKEN ?? "",
     allowedChatIds: (process.env.TELEGRAM_ALLOWED_CHAT_IDS ?? "")
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean),
-    idlePollSeconds: Number(process.env.IDLE_POLL_SECONDS ?? 300),
-    activePollSeconds: Number(process.env.ACTIVE_POLL_SECONDS ?? 10),
+    idlePollSeconds: numberEnv("IDLE_POLL_SECONDS", 300),
+    activePollSeconds: numberEnv("ACTIVE_POLL_SECONDS", 10),
   },
   dashboard: {
-    port: Number(process.env.DASHBOARD_PORT ?? 4790),
+    port: numberEnv("DASHBOARD_PORT", 4790),
+    // Loopback by default: the dashboard has no auth and its /start endpoint spends
+    // money. It used to listen on every interface, i.e. to anyone on the same network.
+    host: process.env.DASHBOARD_HOST ?? "127.0.0.1",
   },
 };
 

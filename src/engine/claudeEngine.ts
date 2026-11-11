@@ -1,9 +1,10 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import type { ClaudeTurnResult } from "../types.js";
 import { buildDisallowedTools } from "./guardrails.js";
 import { SECRET_ENV_VARS, secretValues } from "../config.js";
 import { scrubSecrets } from "./secretScrub.js";
+import { killTaskChildren, trackTaskChild } from "./processRegistry.js";
 
 // Denylist, not allowlist: the `claude` CLI's own auth/config env surface (PATH, HOME,
 // proxy settings, NODE_OPTIONS, whatever it reads for login state) isn't fully known
@@ -31,17 +32,15 @@ interface RunClaudeTurnOptions {
   // explicitly (config.models.*) so this is effectively always set in practice.
   model?: string;
   onLog?: (line: string) => void;
+  // False for turns that aren't part of a task (the Telegram chat classifier). /kill is
+  // about stopping paid task work; a chat reply must neither be killed by it nor, as it
+  // used to, knock the real task's process out of /kill's reach.
+  killable?: boolean;
 }
 
-// Tracked outside the promise closure so /kill can reach across process
-// boundaries that don't share call stacks (Telegram command handler vs. the
-// in-flight turn). Only one turn ever runs at a time (the queue is sequential).
-let currentChild: ChildProcess | null = null;
-
+// /kill's entry point — see processRegistry.ts for what it reaches and why.
 export function killCurrentTurn(): boolean {
-  if (!currentChild) return false;
-  currentChild.kill("SIGTERM");
-  return true;
+  return killTaskChildren();
 }
 
 function truncate(s: string, n: number): string {
@@ -130,7 +129,7 @@ export async function runClaudeTurn(opts: RunClaudeTurnOptions): Promise<ClaudeT
 
   await new Promise<void>((resolve, reject) => {
     const child = spawn("claude", args, { cwd: opts.cwd, env: buildAgentEnv() });
-    currentChild = child;
+    if (opts.killable !== false) trackTaskChild(child);
 
     const rl = createInterface({ input: child.stdout });
     rl.on("line", (line) => {
@@ -167,7 +166,6 @@ export async function runClaudeTurn(opts: RunClaudeTurnOptions): Promise<ClaudeT
     child.stderr.on("data", (chunk) => (stderrText += chunk));
     child.on("error", reject);
     child.on("close", (code, signal) => {
-      currentChild = null;
       if (signal) {
         reject(new Error(`claude killed by ${signal}`));
         return;

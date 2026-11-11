@@ -60,3 +60,15 @@ test("toTaskSpec: maps issue fields straight through with empty acceptance crite
     acceptanceCriteria: [],
   });
 });
+
+// Audit finding (2026-11-12): title and description were read as one string, so a
+// ticket retagged in its title but still mentioning the old tag in its description
+// came back "ambiguous" and was dispatched cross-repo with no usable criteria.
+test("detectRepo: a tagged title decides, whatever tags the description mentions", () => {
+  assert.deepEqual(detectRepo({ key: "X-1", summary: "[backend] fix access", description: "раньше было помечено [web], шаги на фронте" }), { kind: "backend" });
+});
+
+test("detectRepo: the description is only consulted for an untagged title", () => {
+  assert.deepEqual(detectRepo({ key: "X-1", summary: "fix access", description: "[frontend] кнопка" }), { kind: "frontend" });
+  assert.deepEqual(detectRepo({ key: "X-1", summary: "[backend][frontend] fix access", description: "" }), { kind: "ambiguous" });
+});

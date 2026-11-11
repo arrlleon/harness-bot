@@ -24,7 +24,16 @@ function sendJson(res: import("node:http").ServerResponse, status: number, body:
 // has no bot to announce through, so it omits the callback: a click there still
 // proposes (and anyone watching Jira sees the pendingApproval take effect on /status
 // once a bot is started), it just has nowhere to push a live notification.
-export function startDashboardServer(port: number, onProposal?: (proposal: Proposal) => void): void {
+// onNotice: anything a dashboard click produced that ISN'T a proposal — "skipped",
+// "paused" (daily cap), "busy", or a thrown error. These used to vanish: the request
+// had already answered 202, and the outcome went nowhere, so "start" just did nothing
+// with no explanation anywhere.
+export function startDashboardServer(
+  port: number,
+  onProposal?: (proposal: Proposal) => void,
+  onNotice?: (text: string) => void,
+  host = "127.0.0.1",
+): void {
   if (server) return;
   server = createServer((req, res) => {
     if (req.url === "/api/state") {
@@ -58,7 +67,7 @@ export function startDashboardServer(port: number, onProposal?: (proposal: Propo
     if (startMatch && req.method === "POST") {
       const issueKey = startMatch[1];
       const live = getLiveState();
-      if (live.currentJob || live.pendingApproval || live.pendingHumanReview || live.pendingBrief) {
+      if (live.currentJob || live.analyzing || live.pendingApproval || live.pendingHumanReview || live.pendingBrief) {
         sendJson(res, 409, { error: "already busy, or something else is waiting on a decision" });
         return;
       }
@@ -66,15 +75,27 @@ export function startDashboardServer(port: number, onProposal?: (proposal: Propo
       proposeIssueByKey(issueKey)
         .then((outcome) => {
           if (outcome.kind === "proposed") onProposal?.(outcome.proposal);
+          else if (outcome.kind === "skipped") onNotice?.(`⏭️ ${issueKey}: пропущен (${outcome.reason})`);
+          else if (outcome.kind === "paused") onNotice?.(`⏸ ${issueKey} не запущен: ${outcome.reason}`);
+          else onNotice?.(`${issueKey} не запущен с дашборда: бот занят другой задачей или ждёт решения.`);
         })
-        .catch((err: Error) => console.error(`[dashboard] propose for ${issueKey} failed:`, err.message));
+        .catch((err: Error) => {
+          console.error(`[dashboard] propose for ${issueKey} failed:`, err.message);
+          onNotice?.(`❌ ${issueKey}: не удалось проанализировать — ${err.message}`);
+        });
       return;
     }
 
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     res.end(DASHBOARD_PAGE);
   });
-  server.listen(port);
+  // Without a handler an 'error' event (port already taken — a second bot instance, a
+  // stale process) is an uncaught exception that takes the whole bot down with it.
+  server.on("error", (err: NodeJS.ErrnoException) => {
+    console.error(`[dashboard] не удалось запустить на ${host}:${port}: ${err.message}. Бот работает дальше без дашборда.`);
+    server = null;
+  });
+  server.listen(port, host);
 }
 
 export function dashboardUrl(port: number): string {

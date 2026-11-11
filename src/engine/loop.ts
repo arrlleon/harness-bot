@@ -1,4 +1,5 @@
 import type {
+  ClaudeTurnResult,
   CloseLoopIteration,
   CloseLoopResult,
   EngineConfig,
@@ -522,16 +523,58 @@ export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promis
       return { task, success: false, iterations, totalCostUsd, stopReason: "max_budget", worktreeDir, acceptanceTestPath };
     }
 
-    const turn = await runClaudeTurn({
-      cwd: worktreeDir,
-      prompt,
-      permissionMode: config.permissionMode,
-      resumeSessionId,
-      maxBudgetUsd: remainingBudget,
-      extraDeniedPaths,
-      model: config.model,
-      onLog: config.onLog,
-    });
+    let turn: ClaudeTurnResult;
+    try {
+      turn = await runClaudeTurn({
+        cwd: worktreeDir,
+        prompt,
+        permissionMode: config.permissionMode,
+        resumeSessionId,
+        maxBudgetUsd: remainingBudget,
+        extraDeniedPaths,
+        model: config.model,
+        onLog: config.onLog,
+      });
+    } catch (err) {
+      // The turn never returned a result at all — killed by /kill, or the CLI died.
+      // Everything needed to pick the work back up is still known here, so this is a
+      // resumable agent_error like any other rather than an exception that unwinds
+      // past the state it would take to continue. With no session to --resume (the
+      // very first turn was the one that died) the continuation starts fresh from the
+      // diff instead.
+      const message = (err as Error)?.message ?? String(err);
+      const interrupted: ClaudeTurnResult = {
+        sessionId: resumeSessionId ?? "",
+        resultText: /killed by SIG|\/kill/.test(message) ? "ход остановлен вручную (/kill)" : `ход прерван: ${message.slice(0, 300)}`,
+        isError: true,
+        terminalReason: "interrupted",
+        totalCostUsd: 0,
+        contextTokens: 0,
+        usage: { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0 },
+      };
+      iterations.push({ turn: interrupted, verify: { passed: false, output: interrupted.resultText, gates: [] } });
+      return {
+        task,
+        success: false,
+        iterations,
+        totalCostUsd,
+        stopReason: "agent_error",
+        worktreeDir,
+        acceptanceTestPath,
+        resumeState: {
+          sessionId: resumeSessionId ?? "",
+          worktreeDir,
+          iteration: i,
+          totalCostUsd,
+          gates,
+          baselines,
+          extraDeniedPaths,
+          acceptanceTestPath,
+          previousFingerprint,
+          freshSession: !resumeSessionId,
+        },
+      };
+    }
     totalCostUsd += turn.totalCostUsd;
     resumeSessionId = turn.sessionId;
     config.onIteration?.({ iteration: i + 1, phase: "iterating", costUsd: totalCostUsd, summary: turn.resultText.slice(0, 200) });

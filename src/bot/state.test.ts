@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { estimateCost, computeMetrics, outcomeToRecord, type BotState, type TaskRecord } from "./state.js";
+import { estimateCost, computeMetrics, outcomeToRecord, countSince, type BotState, type TaskRecord } from "./state.js";
 
 function record(partial: Partial<TaskRecord> & { issueKey: string }): TaskRecord {
   return {
@@ -187,4 +187,18 @@ test("outcomeToRecord never goes negative and skips non-record outcomes", () => 
   );
   assert.equal(record?.costUsd, 0);
   assert.equal(outcomeToRecord({ kind: "brief_pending", issueKey: "XEN-3" }, "t"), null);
+});
+
+// Audit finding (2026-11-12): the daily task cap counted history rows — one ticket
+// escalated and continued three times used up four of ten, and cancelled proposals
+// counted too.
+test("countSince counts distinct tickets that got real work, not history rows", () => {
+  const state = stateWith([
+    record({ issueKey: "XEN-540", outcome: "needs_human", timestamp: "2026-11-10T10:00:00.000Z" }),
+    record({ issueKey: "XEN-540", outcome: "needs_human", timestamp: "2026-11-10T11:00:00.000Z" }),
+    record({ issueKey: "XEN-540", outcome: "closed", timestamp: "2026-11-10T12:00:00.000Z" }),
+    record({ issueKey: "XEN-541", outcome: "skipped", timestamp: "2026-11-10T12:30:00.000Z" }),
+    record({ issueKey: "XEN-539", outcome: "closed", timestamp: "2026-11-09T12:00:00.000Z" }),
+  ]);
+  assert.equal(countSince(state, "2026-11-10T00:00:00.000Z"), 1);
 });

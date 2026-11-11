@@ -1,6 +1,7 @@
-import { exec } from "node:child_process";
+import { spawn } from "node:child_process";
 import type { GateBaseline, GateResult, GateSpec, VerifyResult } from "../types.js";
 import { buildAgentEnv } from "./claudeEngine.js";
+import { signalChild, trackTaskChild } from "./processRegistry.js";
 
 // A gate that couldn't actually run (ran out of memory, hung past its timeout, drowned
 // its own output buffer) says nothing about the code under test. Thrown rather than
@@ -36,6 +37,8 @@ export function stripAnsi(text: string): string {
   return text.replace(/\x1b\[[0-9;]*[A-Za-z]/g, "");
 }
 
+const KILLED_BY_HUMAN = "остановлен вручную (/kill)";
+
 interface RawRun {
   exitedZero: boolean;
   output: string;
@@ -44,20 +47,45 @@ interface RawRun {
 }
 
 // Pure so the classification is testable without spawning anything.
-export function classifyCrash(err: { killed?: boolean; signal?: string | null; code?: unknown } | null, output: string, timeoutMs: number): string | undefined {
-  if (err?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") return "вывод превысил лимит буфера";
-  if (err?.killed) return `не завершился за ${Math.round(timeoutMs / 60_000)} мин и был остановлен`;
+export function classifyCrash(exit: { timedOut?: boolean; signal?: string | null }, output: string, timeoutMs: number): string | undefined {
+  if (exit.timedOut) return `не завершился за ${Math.round(timeoutMs / 60_000)} мин и был остановлен`;
+  // SIGTERM is /kill (processRegistry.ts); the timeout above uses SIGKILL.
+  if (exit.signal === "SIGTERM") return KILLED_BY_HUMAN;
   if (/JavaScript heap out of memory|FATAL ERROR: .*Allocation failed/.test(output)) return "не хватило памяти (JavaScript heap out of memory)";
   return undefined;
 }
 
+const MAX_GATE_OUTPUT_CHARS = 32 * 1024 * 1024;
+
+// spawn + its own process group rather than exec: exec's timeout and kill only ever
+// reach the `sh -c` wrapper, so a hung `yarn test` kept its jest workers alive (and the
+// gate "timed out" while still burning CPU). Output past the cap is dropped, not
+// treated as a failure of the gate.
 function runRaw(cwd: string, command: string): Promise<RawRun> {
   const timeoutMs = gateTimeoutMs();
   return new Promise((resolve) => {
-    exec(command, { cwd, maxBuffer: 1024 * 1024 * 64, timeout: timeoutMs, killSignal: "SIGKILL", env: gateEnv() }, (err, stdout, stderr) => {
-      const output = stripAnsi(String(stdout ?? "") + String(stderr ?? "")) || (err?.message ?? "");
-      if (!err) return resolve({ exitedZero: true, output });
-      resolve({ exitedZero: false, output, crash: classifyCrash(err, output, timeoutMs) });
+    const child = spawn("/bin/sh", ["-c", command], { cwd, env: gateEnv(), detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    trackTaskChild(child, { group: true });
+    let raw = "";
+    let timedOut = false;
+    const collect = (chunk: Buffer): void => {
+      if (raw.length < MAX_GATE_OUTPUT_CHARS) raw += chunk.toString("utf8");
+    };
+    child.stdout?.on("data", collect);
+    child.stderr?.on("data", collect);
+    const timer = setTimeout(() => {
+      timedOut = true;
+      signalChild(child, "SIGKILL", true);
+    }, timeoutMs);
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      resolve({ exitedZero: false, output: err.message, crash: `не удалось запустить: ${err.message}` });
+    });
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      const output = stripAnsi(raw);
+      if (code === 0) return resolve({ exitedZero: true, output });
+      resolve({ exitedZero: false, output, crash: classifyCrash({ timedOut, signal }, output, timeoutMs) });
     });
   });
 }
@@ -66,7 +94,7 @@ function runRaw(cwd: string, command: string): Promise<RawRun> {
 // attempt is worth it before giving up on the whole task.
 async function runGateCommand(cwd: string, gate: GateSpec): Promise<RawRun> {
   let run = await runRaw(cwd, gate.command);
-  if (run.crash) run = await runRaw(cwd, gate.command);
+  if (run.crash && run.crash !== KILLED_BY_HUMAN) run = await runRaw(cwd, gate.command);
   if (run.crash) {
     throw new GateInfraError(`гейт "${gate.name}" не смог отработать: ${run.crash}. Это проблема окружения, а не кода задачи.\n${run.output.slice(-600)}`);
   }

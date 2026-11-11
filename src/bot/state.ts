@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { QueueRunOutcome } from "../types.js";
@@ -36,14 +36,28 @@ export function loadState(): BotState {
   if (!existsSync(STATE_PATH)) return defaultState();
   try {
     return { ...defaultState(), ...JSON.parse(readFileSync(STATE_PATH, "utf8")) };
-  } catch {
+  } catch (err) {
+    // An unreadable file used to become an empty state in silence — and the next
+    // recordTask then overwrote the whole history with one record, zeroing the daily
+    // budget count along with it. Move it aside so nothing is lost, and say so.
+    const aside = `${STATE_PATH}.corrupt-${Date.now()}`;
+    try {
+      renameSync(STATE_PATH, aside);
+      console.error(`[state] ${STATE_PATH} не читается (${(err as Error).message}) — сохранён как ${aside}, история начата заново`);
+    } catch {
+      console.error(`[state] ${STATE_PATH} не читается и его не удалось отложить: ${(err as Error).message}`);
+    }
     return defaultState();
   }
 }
 
+// Write-then-rename: a crash mid-write leaves the previous file intact instead of a
+// truncated one (which the catch above would then have to throw away).
 export function saveState(state: BotState): void {
   mkdirSync(dirname(STATE_PATH), { recursive: true });
-  writeFileSync(STATE_PATH, JSON.stringify(state, null, 2));
+  const tmp = `${STATE_PATH}.tmp`;
+  writeFileSync(tmp, JSON.stringify(state, null, 2));
+  renameSync(tmp, STATE_PATH);
 }
 
 export function recordTask(state: BotState, record: TaskRecord): void {
@@ -135,8 +149,11 @@ export function costSince(state: BotState, sinceIso: string): number {
   return state.history.filter((r) => r.timestamp >= sinceIso).reduce((sum, r) => sum + r.costUsd, 0);
 }
 
+// Distinct tickets that got real work, not history rows: one ticket that was
+// escalated and continued three times is one task, and a cancelled proposal isn't one
+// at all. Counting rows let a single stubborn ticket eat the whole MAX_TASKS_PER_DAY.
 export function countSince(state: BotState, sinceIso: string): number {
-  return state.history.filter((r) => r.timestamp >= sinceIso).length;
+  return new Set(state.history.filter((r) => r.timestamp >= sinceIso && r.outcome !== "skipped").map((r) => r.issueKey)).size;
 }
 
 export function startOfTodayIso(): string {
