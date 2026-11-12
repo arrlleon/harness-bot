@@ -24,8 +24,18 @@ export interface TaskRecord {
 }
 
 export interface BotState {
+  // The ticket menus are live (/start was pressed and /stop wasn't since).
   running: boolean;
+  // The bot may pick the next ticket off the queue by itself (/auto). Separate from
+  // `running` on purpose: /start used to switch this on too, so ten seconds after the
+  // menu appeared the bot analysed whatever was on top of the queue instead of waiting
+  // for the pick (reproduced live, XEN-632, 2026-11-12).
+  autoPoll?: boolean;
   history: TaskRecord[];
+}
+
+export function autoPollActive(state: BotState): boolean {
+  return state.running && state.autoPoll === true;
 }
 
 function defaultState(): BotState {

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { estimateCost, computeMetrics, outcomeToRecord, countSince, type BotState, type TaskRecord } from "./state.js";
+import { estimateCost, computeMetrics, outcomeToRecord, countSince, autoPollActive, type BotState, type TaskRecord } from "./state.js";
 
 function record(partial: Partial<TaskRecord> & { issueKey: string }): TaskRecord {
   return {
@@ -201,4 +201,12 @@ test("countSince counts distinct tickets that got real work, not history rows", 
     record({ issueKey: "XEN-539", outcome: "closed", timestamp: "2026-11-09T12:00:00.000Z" }),
   ]);
   assert.equal(countSince(state, "2026-11-10T00:00:00.000Z"), 1);
+});
+
+// /start alone must never let the bot pick a ticket by itself — only /auto does.
+test("autoPollActive needs both live menus and an explicit /auto", () => {
+  assert.equal(autoPollActive({ running: true, history: [] }), false);
+  assert.equal(autoPollActive({ running: true, autoPoll: false, history: [] }), false);
+  assert.equal(autoPollActive({ running: false, autoPoll: true, history: [] }), false);
+  assert.equal(autoPollActive({ running: true, autoPoll: true, history: [] }), true);
 });

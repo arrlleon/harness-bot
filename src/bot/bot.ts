@@ -10,6 +10,7 @@ import {
   countSince,
   startOfTodayIso,
   computeMetrics,
+  autoPollActive,
   type BotState,
 } from "./state.js";
 import { setBotRunning, getLiveState, loadPersistedPending } from "./liveState.js";
@@ -51,8 +52,9 @@ function statusTag(status: string | undefined): string {
 const HELP_TEXT = [
   "Я — твой зам. CEO по тикетам из Jira: слежу за очередью, читаю задачу и предлагаю решение, а как только одобришь — довожу до MR и держу в курсе на каждом шаге.",
   "",
-  "/start — покажу список твоих задач («Сделать» + «В работе») с кнопками, выбери — начну разбираться именно с этой",
-  "/stop — деактивирую кнопки в уже показанных списках (то, что уже в работе или ждёт твоего решения, не трогаю)",
+  "/start — покажу список твоих задач («Сделать» + «В работе») с кнопками и жду, пока выберешь; сам ничего не беру",
+  "/auto — автопоиск: сам беру верхнюю задачу из очереди на анализ и присылаю предложение (в работу — только после твоего подтверждения)",
+  "/stop — выключу автопоиск и деактивирую кнопки в уже показанных списках (то, что уже в работе или ждёт твоего решения, не трогаю)",
   "/kill — немедленно прерву текущий ход (если завис или делает не то)",
   "/status — расскажу, что сейчас происходит, расход, последний обработанный тикет",
   "/metrics — исторический трек-рекорд: доля задач без эскалации, средние стоимость/время/раунды ревью",
@@ -292,6 +294,7 @@ export async function startBot(): Promise<void> {
   // polling; on a fresh process start no loop can possibly be alive yet, so the
   // persisted flag would otherwise lie to /status until the next /start or /stop.
   state.running = false;
+  state.autoPoll = false;
   saveState(state);
   setBotRunning(false);
 
@@ -353,12 +356,12 @@ export async function startBot(): Promise<void> {
 
   function schedulePoll(delaySeconds: number): void {
     clearPoll();
-    if (!state.running) return;
+    if (!autoPollActive(state)) return;
     pollTimer = setTimeout(() => void pollOnce(), delaySeconds * 1000);
   }
 
   async function pollOnce(): Promise<void> {
-    if (!state.running) return;
+    if (!autoPollActive(state)) return;
     try {
       const outcome = await proposeNext();
       switch (outcome.kind) {
@@ -445,9 +448,9 @@ export async function startBot(): Promise<void> {
   // mid-task had no lasting effect at all once that task closed.
   async function sendTicketMenu(ctx: Context, intro = "Выбери задачу, которую взять в работу:", opts: { resume?: boolean } = {}): Promise<void> {
     if (opts.resume) {
+      // Menus only. Picking tickets by itself is /auto's job — see BotState.autoPoll.
       state.running = true;
       saveState(state);
-      schedulePoll(config.telegram.activePollSeconds);
     } else if (!state.running) {
       return;
     }
@@ -468,6 +471,15 @@ export async function startBot(): Promise<void> {
   }
 
   bot.command("start", (ctx) => sendTicketMenu(ctx, undefined, { resume: true }));
+
+  async function handleAuto(ctx: Context): Promise<void> {
+    state.running = true;
+    state.autoPoll = true;
+    saveState(state);
+    schedulePoll(config.telegram.activePollSeconds);
+    await ctx.reply("🔁 Автопоиск включён: сам беру верхнюю задачу из очереди на анализ и присылаю предложение. В работу без твоего подтверждения ничего не идёт. Выключить — /stop.");
+  }
+  bot.command("auto", handleAuto);
 
   bot.callbackQuery(/^pick:(.+)$/, async (ctx) => {
     const key = ctx.match[1];
@@ -555,6 +567,7 @@ export async function startBot(): Promise<void> {
 
   async function handleStop(ctx: Context): Promise<void> {
     state.running = false;
+    state.autoPoll = false;
     saveState(state);
     clearPoll();
     await ctx.reply("🛑 Понял. Кнопки в уже показанных списках задач больше не сработают — напиши /start заново, когда понадобится.");
@@ -563,6 +576,7 @@ export async function startBot(): Promise<void> {
 
   async function handleKill(ctx: Context): Promise<void> {
     state.running = false;
+    state.autoPoll = false;
     saveState(state);
     clearPoll();
     const killed = killCurrentTurn();
@@ -648,7 +662,9 @@ export async function startBot(): Promise<void> {
     const lines = [
       doing,
       waitingOn ? `⏳ жду твоего решения по: ${waitingOn}` : "⏳ ничего не жду от тебя сейчас",
-      `${state.running ? "🟢 автопоиск новых задач включён" : "⚪️ автопоиск новых задач выключен (/start — включить)"}`,
+      autoPollActive(state)
+        ? "🔁 автопоиск включён: сам беру задачи из очереди (/stop — выключить)"
+        : `⚪️ автопоиск выключен, жду твоего выбора${state.running ? "" : " (/start — список задач)"}`,
       `💰 сегодня: $${costSince(state, startOfTodayIso()).toFixed(2)} из $${config.dailyBudgetUsd}, всего: $${totalCostUsd(state).toFixed(2)}`,
       last ? `последнее: ${last.issueKey} (${last.outcome}) — ${last.detail}` : "последнее: пока ничего",
     ];
