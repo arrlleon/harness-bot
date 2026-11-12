@@ -1,6 +1,9 @@
 #!/usr/bin/env node
-// Diff-scoped Jest gate: runs only the unit tests next to what the task changed, and
-// fails only on failures that are NEW relative to the task's base commit.
+// Diff-scoped test gate (Jest or Vitest): runs only the unit tests next to what the task
+// changed, and fails only on failures that are NEW relative to the task's base commit.
+// The runner is picked per repo: a vitest config means Vitest (front-ai), otherwise
+// Jest (back-ai); SCOPED_TEST_RUNNER=jest|vitest overrides. Both write the same
+// Jest-shaped JSON report, which is all the comparison below needs.
 //
 // Why scoped: back-ai's full suite is 1200+ spec files and 45+ minutes, on every
 // iteration (XEN-541, 2026-11-10).
@@ -48,8 +51,16 @@ function tryGit(args, dir = cwd) {
   }
 }
 
+// The fetch is a nicety (the harness fetches when it creates the worktree), so it gets
+// a short leash: a slow GitLab once held the whole gate for seven minutes here.
 function resolveBase() {
-  tryGit(["fetch", "origin", TARGET_BRANCH]);
+  spawnSync("git", ["fetch", "origin", TARGET_BRANCH], {
+    cwd,
+    stdio: "ignore",
+    timeout: 20_000,
+    killSignal: "SIGKILL",
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+  });
   return tryGit(["merge-base", "HEAD", `origin/${TARGET_BRANCH}`]) ?? tryGit(["merge-base", "HEAD", TARGET_BRANCH]);
 }
 
@@ -99,19 +110,36 @@ const stripAnsi = (text) =>
     .filter((line) => !/^\s+at .*(node_modules|node:internal)/.test(line))
     .join("\n");
 
+function detectRunner(dir) {
+  const forced = process.env.SCOPED_TEST_RUNNER;
+  if (forced === "jest" || forced === "vitest") return forced;
+  const hasVitestConfig = readdirSync(dir).some((name) => /^vitest\.config\.[cm]?[jt]s$/.test(name));
+  return hasVitestConfig ? "vitest" : "jest";
+}
+
+const RUNNER = detectRunner(cwd);
+
+// Jest takes exact paths (--runTestsByPath, so a path is never read as a regex);
+// Vitest takes them as positional filters. Same report format either way.
+function runnerArgs(outFile, files) {
+  return RUNNER === "vitest"
+    ? ["run", "--reporter=json", `--outputFile=${outFile}`, ...files]
+    : ["--ci", "--maxWorkers=75%", "--json", `--outputFile=${outFile}`, "--runTestsByPath", ...files];
+}
+
 function runJest(dir, files) {
-  const jestBin = join(dir, "node_modules", ".bin", "jest");
-  if (!existsSync(jestBin)) return { broken: `jest не найден в ${jestBin}` };
+  const jestBin = join(dir, "node_modules", ".bin", RUNNER);
+  if (!existsSync(jestBin)) return { broken: `${RUNNER} не найден в ${jestBin}` };
   const outDir = mkdtempSync(join(tmpdir(), "scoped-test-out-"));
   const outFile = join(outDir, "result.json");
-  const run = spawnSync(jestBin, ["--ci", "--maxWorkers=75%", "--json", `--outputFile=${outFile}`, "--runTestsByPath", ...files], {
+  const run = spawnSync(jestBin, runnerArgs(outFile, files), {
     cwd: dir,
     encoding: "utf8",
     maxBuffer: 1024 * 1024 * 256,
   });
   try {
     if (!existsSync(outFile)) {
-      return { broken: `jest не дал результата (код ${run.status ?? run.signal})\n${stripAnsi(run.stderr).slice(-3000)}` };
+      return { broken: `${RUNNER} не дал результата (код ${run.status ?? run.signal})\n${stripAnsi(run.stderr).slice(-3000)}` };
     }
     const report = JSON.parse(readFileSync(outFile, "utf8"));
     const root = realpathSync(dir);
@@ -170,7 +198,7 @@ function main() {
     log(`рядом с изменёнными файлами нет unit-тестов (изменено: ${changed.join(", ")})`);
     return 0;
   }
-  log(`${files.length} файлов тестов рядом с ${changed.length} изменёнными файлами`);
+  log(`${RUNNER}: ${files.length} файлов тестов рядом с ${changed.length} изменёнными файлами`);
 
   const current = runJest(cwd, files);
   if (current.broken) {
@@ -179,7 +207,7 @@ function main() {
   }
   if (current.failures.size === 0) {
     if (current.exitCode !== 0) {
-      log(`jest вернул код ${current.exitCode} без упавших тестов — считаю провалом`);
+      log(`${RUNNER} вернул код ${current.exitCode} без упавших тестов — считаю провалом`);
       return 1;
     }
     log(`все тесты прошли (${current.total})`);

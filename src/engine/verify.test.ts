@@ -136,8 +136,8 @@ test("strict gate passes once it actually exits 0, regardless of a failing basel
 
 // A strict gate's baseline is never consulted (both tests above pass regardless of
 // what the baseline command even was) — establishBaselines shouldn't bother running
-// it at all. Matters doubly for a diff-scoped test command (scripts/scoped-test-
-// backend.sh): run at baseline time, before the agent's first edit, it would find
+// it at all. Matters doubly for a diff-scoped test command (scripts/scoped-test.mjs):
+// run at baseline time, before the agent's first edit, it would find
 // nothing changed and do nothing useful anyway.
 test("establishBaselines skips running a strict gate's command at all", async () => {
   const gates: GateSpec[] = [
