@@ -111,3 +111,18 @@ test("stripPreamble drops reasoning written before ПЛАН:, and the parsed pla
   assert.equal(parseRepoVerdict(text, 0.1).plan, "Добавить поле signedAt в DTO.");
   assert.equal(stripPreamble("без метки"), "без метки");
 });
+
+test("parseRepoVerdict reads the plain one-line summary and keeps it out of the plan", () => {
+  const verdict = parseRepoVerdict(`КОРОТКО: «добавлю на бэкенде список активных клиентов».\n\n${PLAN}`, 0.2);
+  assert.equal(verdict.summary, "добавлю на бэкенде список активных клиентов");
+  assert.doesNotMatch(verdict.plan, /КОРОТКО/);
+  assert.equal(parseRepoVerdict(PLAN, 0.2).summary, "");
+});
+
+test("combineVerdicts carries the summary: one repo as is, both repos labelled", () => {
+  const back = parseRepoVerdict(`КОРОТКО: добавлю поле\n\n${PLAN}`, 0.1);
+  const front = parseRepoVerdict(`КОРОТКО: покажу поле в карточке\n\n${PLAN}`, 0.1);
+  assert.equal(combineVerdicts(back, front).summary, "бэкенд — добавлю поле; фронтенд — покажу поле в карточке");
+  const none = parseRepoVerdict("ИЗМЕНЕНИЯ: НЕ НУЖНЫ — нечего", 0.1);
+  assert.equal(combineVerdicts(back, none).summary, "добавлю поле");
+});

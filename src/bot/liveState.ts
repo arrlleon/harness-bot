@@ -50,6 +50,8 @@ export interface PendingApproval {
   // close loop (implement) only ever reads these for prompt context, it has no path
   // to change them. The human approves (or rejects) exactly this list before any
   // code gets written, same spirit as Avengers Harness's frozen-acceptance-tests idea.
+  // One plain sentence for the proposal's "что сделаю" line (see queue.ts Proposal).
+  summary?: string;
   acceptanceCriteria: string[];
   costUsd: number;
   // Rough historical baseline (same-repo if there's enough of it, else overall) shown

@@ -150,6 +150,8 @@ export interface Proposal {
   repo: string;
   descriptionShort: string;
   plan: string;
+  // One plain sentence for the CEO (engine/repoScope.ts); absent on older paths.
+  summary?: string;
   acceptanceCriteria: string[];
   costUsd: number;
   costEstimate: CostEstimate | null;
@@ -315,6 +317,7 @@ async function proposeByCodeScope(
     repo: analysis.scope,
     descriptionShort: issue.description.slice(0, 300),
     plan: withSkippedRepos(analysis.plan, analysis.skippedRepos),
+    summary: analysis.summary || undefined,
     acceptanceCriteria: analysis.acceptanceCriteria,
     costUsd: analysis.costUsd,
     costEstimate: estimateCost(loadState(), analysis.scope),

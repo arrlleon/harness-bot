@@ -15,6 +15,8 @@ import {
 } from "./state.js";
 import { setBotRunning, getLiveState, loadPersistedPending } from "./liveState.js";
 import { acquireBotLock } from "./lock.js";
+import { headline, explainStop, composeDecisionText, DECISION_BUTTONS, PROPOSAL_BUTTONS } from "./messages.js";
+import { startProgressReporter } from "./progress.js";
 import { tmpdir } from "node:os";
 import { recoverOrphanedCheckpoints } from "../engine/checkpoint.js";
 import { startDashboardServer, dashboardUrl } from "../web/server.js";
@@ -36,7 +38,7 @@ import {
 import { killCurrentTurn, runClaudeTurn } from "../engine/claudeEngine.js";
 import type { QueueRunOutcome, Brief } from "../types.js";
 
-const REPO_RU: Record<string, string> = { backend: "бэкенд", frontend: "фронтенд", cross: "кросс-репо (бэкенд → фронтенд)" };
+const REPO_RU: Record<string, string> = { backend: "бэкенд", frontend: "фронтенд", cross: "бэкенд и фронтенд (сначала бэкенд, потом фронтенд)" };
 
 function statusTag(status: string | undefined): string {
   if (status === config.jira.inProgressStatus) return "[IN WORK]";
@@ -74,7 +76,7 @@ function describeOutcome(outcome: QueueRunOutcome | { kind: "error"; message: st
     case "empty":
       return null;
     case "paused":
-      return `⏸ Приостановился: ${outcome.reason}`;
+      return `${headline("paused")}\n${outcome.reason}`;
     case "busy":
       return null;
     case "brief_pending":
@@ -82,15 +84,15 @@ function describeOutcome(outcome: QueueRunOutcome | { kind: "error"; message: st
       // plain-text path.
       return null;
     case "skipped":
-      return `⏭ Пропустил ${outcome.issueKey} (${outcome.reason})`;
+      return `${headline("skipped", outcome.issueKey)}\n${outcome.reason}`;
     case "needs_human":
-      return `⚠️ Застрял на ${outcome.issueKey} (${outcome.reason}), потратил $${outcome.costUsd.toFixed(4)} — нужно твоё решение`;
+      return `${headline("decision", outcome.issueKey)}\n${explainStop(outcome.reason).why}`;
     case "closed": {
       const reportLine = outcome.report ? `\n\n${outcome.report}` : "";
-      return `✅ Готово: ${outcome.issueKey} закрыт, MR — ${outcome.mrUrl} (потратил $${outcome.costUsd.toFixed(4)})${reportLine}`;
+      return `${headline("done", outcome.issueKey)}\nMR открыт: ${outcome.mrUrl}\nПотрачено: $${outcome.costUsd.toFixed(2)}${reportLine}`;
     }
     case "error":
-      return `❌ Не получилось: ${outcome.message}`;
+      return `${headline("error")}\n${outcome.message}`;
   }
 }
 
@@ -115,7 +117,7 @@ function expandableBlockquote(lines: string[]): string {
 // enough to bury the header below the fold — the actual complaint) collapse into one
 // tap-to-expand block instead of dumping both inline every time.
 function formatCostEstimate(estimate: Proposal["costEstimate"]): string {
-  if (!estimate) return "📊 оценка: недостаточно истории для прогноза";
+  if (!estimate) return "";
   // The leading "~" here is a literal approx sign, not MarkdownV2 syntax — but it's
   // also MarkdownV2's strikethrough delimiter, so an unescaped one left Telegram
   // waiting for a closing "~" that never came and rejected the whole message
@@ -126,38 +128,65 @@ function formatCostEstimate(estimate: Proposal["costEstimate"]): string {
     estimate.medianDurationMs !== null
       ? `, \\~${escapeMarkdownV2(Math.round(estimate.medianDurationMs / 60_000).toString())} мин`
       : "";
-  return `📊 по истории \\(${estimate.sampleSize} задач\\): обычно ${cost}${duration}`;
+  return ` · обычно задача ${cost}${duration}`;
+}
+
+const SKIPPED_REPO_LINE = /^Репозиторий (бэкенд|фронтенд) не трогаю: (.+)$/;
+
+// The first sentences of a plan, up to `max` characters — the proposal's one-line
+// "what I'll do"; the full plan is in the collapsed block below it.
+export function planSummary(plan: string, max = 280): string {
+  const sections = /^\[backend\]\n([\s\S]*?)\n\n\[frontend\]\n([\s\S]*)$/.exec(plan.trim());
+  if (sections) {
+    const half = Math.floor(max / 2);
+    return `бэкенд — ${planSummary(sections[1], half)}; фронтенд — ${planSummary(sections[2], half)}`;
+  }
+  const body = plan
+    .split("\n")
+    .filter((line) => !SKIPPED_REPO_LINE.test(line.trim()))
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (body.length <= max) return body;
+  const cut = body.slice(0, max);
+  const lastStop = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("; "));
+  return (lastStop > max / 3 ? cut.slice(0, lastStop + 1) : cut.trimEnd()) + "…";
 }
 
 export function formatProposal(p: Proposal): string {
+  const skipped = p.plan
+    .split("\n")
+    .map((line) => SKIPPED_REPO_LINE.exec(line.trim()))
+    .filter((m): m is RegExpExecArray => m !== null);
+  const where = REPO_RU[p.repo] ?? p.repo;
+  const whereLine =
+    skipped.length > 0
+      ? `Где: ${where}\nНе трогаю: ${skipped.map((m) => `${m[1]} — ${m[2].length > 160 ? m[2].slice(0, 159) + "…" : m[2]}`).join("; ")}`
+      : `Где: ${where}`;
+  const criteriaCount = p.acceptanceCriteria.length;
   const header = [
-    "Смотрю задачу — вот что предлагаю:",
+    `${escapeMarkdownV2(headline("proposal"))} · *${escapeMarkdownV2(p.issueKey)}*`,
+    escapeMarkdownV2(p.title),
     "",
-    `🆕 *${escapeMarkdownV2(p.issueKey)}*: ${escapeMarkdownV2(p.title)}`,
-    `📦 репозиторий: ${escapeMarkdownV2(REPO_RU[p.repo] ?? p.repo)}`,
+    escapeMarkdownV2(whereLine),
+    escapeMarkdownV2(`Что сделаю: ${p.summary || planSummary(p.plan) || "(нет плана)"}`),
+    criteriaCount > 0
+      ? escapeMarkdownV2(`Критерии приёмки: ${criteriaCount} — в блоке ниже`)
+      : escapeMarkdownV2("Критериев нет — зафиксируется только план"),
     // toFixed's decimal point is itself a reserved MarkdownV2 character — reproduced
     // live ("Character '.' is reserved"), easy to miss since it looks like plain text.
-    `💸 анализ стоил $${escapeMarkdownV2(p.costUsd.toFixed(4))}`,
-    formatCostEstimate(p.costEstimate),
+    `Анализ стоил $${escapeMarkdownV2(p.costUsd.toFixed(2))}${formatCostEstimate(p.costEstimate)}`,
   ].join("\n");
 
   // Shown here so approval is a real review of the contract, not a rubber stamp on
   // the plan alone — these criteria are what actually gets frozen into the task once
-  // you tap Подтвердить (see PendingApproval.acceptanceCriteria).
-  const criteriaLines =
-    p.acceptanceCriteria.length > 0
-      ? p.acceptanceCriteria.map((c) => `• ${escapeMarkdownV2(c)}`)
-      : ["\\(модель не сформулировала критерии — будет зафиксирован только план\\)"];
-
+  // it's taken into work (see PendingApproval.acceptanceCriteria).
   const bodyLines = [
-    "📋 Описание:",
-    ...escapeMarkdownV2(p.descriptionShort || "(нет описания)").split("\n"),
-    "",
-    "💡 Предлагаемое решение:",
+    "💡 План полностью:",
     ...escapeMarkdownV2(p.plan || "(нет плана)").split("\n"),
-    "",
-    "✅ Критерии приёмки \\(зафиксируются при подтверждении\\):",
-    ...criteriaLines,
+    ...(criteriaCount > 0
+      ? ["", "✅ Критерии приёмки \\(зафиксируются, если возьмёшь в работу\\):", ...p.acceptanceCriteria.map((c) => `• ${escapeMarkdownV2(c)}`)]
+      : []),
   ];
 
   return [header, "", expandableBlockquote(bodyLines)].join("\n");
@@ -184,7 +213,7 @@ export function formatProposalFitted(p: Proposal): string {
 function formatBrief(issueKey: string, brief: Brief, crossRepoStage?: "backend" | "frontend"): string {
   const stageTag = crossRepoStage === "backend" ? " (бэкенд-часть)" : crossRepoStage === "frontend" ? " (фронтенд-часть)" : "";
   const lines = [
-    `❓ Вопрос по ${issueKey}${stageTag}:`,
+    `${headline("question", issueKey)}${stageTag}`,
     brief.question,
     "",
     ...brief.options.map((o, i) => `${i + 1}. ${o.label}${brief.recommendedIndex === i ? " ★" : ""}`),
@@ -222,20 +251,21 @@ export function plainFromMarkdownV2(text: string): string {
     .replace(/\*([^*\n]+)\*/g, "$1");
 }
 
-const MAX_REASON_CHARS = 700;
+export function composeNeedsHumanText(
+  outcome: { issueKey: string; reason: string; costUsd: number },
+  diff: string | null,
+  opts: { canContinue?: boolean; title?: string; budgetUsd?: number } = {},
+): string {
+  return fitTelegram(
+    composeDecisionText({ ...outcome, title: opts.title, budgetUsd: opts.budgetUsd }, diff, opts.canContinue ?? false),
+  );
+}
 
-// Header first, then as much of the diff as still fits. The reason alone can run to a
-// thousand characters (an agent_error's own text, a rebase conflict) or be unbounded
-// (review findings) — with a fixed 3200-character diff on top, the message went over
-// Telegram's limit and never arrived, buttons included.
-export function composeNeedsHumanText(outcome: { issueKey: string; reason: string; costUsd: number }, diff: string | null): string {
-  const reason = outcome.reason.length > MAX_REASON_CHARS ? outcome.reason.slice(0, MAX_REASON_CHARS) + "…" : outcome.reason;
-  const header = `⚠️ Застрял на ${outcome.issueKey} (${reason}), потратил $${outcome.costUsd.toFixed(4)} — нужно твоё решение.`;
-  if (diff === null) return header;
-  if (!diff.trim()) return `${header}\n\n(diff пустой — похоже, ничего не изменил)`;
-  const room = TELEGRAM_SAFE_CHARS - header.length - 60;
-  const body = diff.length > room ? diff.slice(0, Math.max(0, room)) + "\n… (обрезано, полный diff в worktree)" : diff;
-  return `${header}\n\n${body}`;
+export function decisionKeyboard(issueKey: string, canContinue: boolean, hasWork = true): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  if (hasWork) keyboard.text(DECISION_BUTTONS.accept, `accept_human:${issueKey}`);
+  if (canContinue) keyboard.text(DECISION_BUTTONS.continue, `continue_human:${issueKey}`);
+  return keyboard.row().text(DECISION_BUTTONS.reject, `reject_human:${issueKey}`);
 }
 
 // needs_human doesn't mean the work is wrong — XEN-364 reproduced a case where a fully
@@ -249,36 +279,24 @@ async function sendNeedsHumanReview(
   outcome: { issueKey: string; reason: string; costUsd: number },
 ): Promise<void> {
   let diff: string | null = null;
-  let diffError = "";
   try {
     diff = await getPendingHumanReviewDiff();
   } catch (err) {
-    diffError = `\nНе удалось прочитать diff: ${(err as Error).message.slice(0, 200)}`;
+    console.error("[bot] could not read the pending diff:", (err as Error).message);
   }
+  const pending = getLiveState().pendingHumanReview;
   // No review on record any more (resolved in the meantime) — just say what happened.
-  if (!getLiveState().pendingHumanReview) {
+  if (!pending) {
     await send(composeNeedsHumanText(outcome, null));
     return;
   }
-  const text = composeNeedsHumanText(outcome, diff) + diffError;
-  const keyboard = new InlineKeyboard()
-    .text("✅ Принять и запушить", `accept_human:${outcome.issueKey}`)
-    .text("❌ Отклонить", `reject_human:${outcome.issueKey}`);
-  // Present for context_budget and agent_error (single-repo — see queue.ts's two
-  // commented-out cross-repo resumeState assignments for why cross-repo doesn't get
-  // this button); every other needs_human reason has no resumeState and never shows
-  // this third button at all. The label matters: context_budget's resumeState is
-  // freshSession (that session's own size was the problem — see CloseLoopResumeState's
-  // comment), so clicking it is explicitly accepting a known tradeoff, no memory of
-  // what the stopped session already tried. agent_error instead resumes the exact
-  // same session via --resume (the paused turn's own reasoning, unaffected by whatever
-  // actually caused it — an account limit, a budget cutoff — is exactly what's wanted).
-  const resumeState = getLiveState().pendingHumanReview?.resumeState;
-  if (resumeState) {
-    const label = resumeState.freshSession ? "🔄 Продолжить (новая сессия)" : "🔄 Продолжить";
-    keyboard.row().text(label, `continue_human:${outcome.issueKey}`);
-  }
-  await send(text, keyboard);
+  // "Доработать" exists only where the harness can actually resume the task: a
+  // context_budget or agent_error stop on a single-repo task (see queue.ts's commented-
+  // out cross-repo resumeState assignments for why cross-repo has no resume).
+  const canContinue = Boolean(pending.resumeState);
+  const hasWork = diff === null || diff.trim().length > 0;
+  const text = composeNeedsHumanText(outcome, diff, { canContinue, title: pending.title, budgetUsd: config.maxBudgetUsd });
+  await send(text, decisionKeyboard(outcome.issueKey, canContinue, hasWork));
 }
 
 export async function startBot(): Promise<void> {
@@ -325,11 +343,30 @@ export async function startBot(): Promise<void> {
   const senderFor = (chatId: number | string): Sender => (text, keyboard) => sendSafe(chatId, text, keyboard);
   const announce: Sender = senderFor(announceChatId);
 
+  // "What is it doing now", every 5 minutes while a task runs — one message per task,
+  // edited in place (see progress.ts).
+  startProgressReporter(() => getLiveState().currentJob, {
+    send: (text) =>
+      bot.api
+        .sendMessage(announceChatId, fitTelegram(text))
+        .then((m) => m.message_id)
+        .catch((err) => {
+          console.error("[bot] progress send failed:", (err as Error).message);
+          return null;
+        }),
+    edit: (messageId, text) =>
+      bot.api
+        .editMessageText(announceChatId, messageId, fitTelegram(text))
+        .then(() => true)
+        // Telegram refuses an edit that changes nothing — the message is still current.
+        .catch((err) => /not modified/i.test((err as Error).message)),
+  });
+
   // Shared by the startup restore below and the auto-poll loop further down — a found
   // proposal is announced the same way (same buttons, same MarkdownV2 formatting)
   // whichever path found it.
   async function announceProposal(p: Proposal, prefix = ""): Promise<void> {
-    const keyboard = new InlineKeyboard().text("✅ Подтвердить", `confirm:${p.issueKey}`).text("❌ Отменить", `cancel:${p.issueKey}`);
+    const keyboard = new InlineKeyboard().text(PROPOSAL_BUTTONS.confirm, `confirm:${p.issueKey}`).text(PROPOSAL_BUTTONS.cancel, `cancel:${p.issueKey}`);
     // formatProposal's output is MarkdownV2 (the expandable blockquote) — unlike the
     // plain-text `announce` used for needs_human, this one needs parse_mode set.
     await sendSafe(announceChatId, escapeMarkdownV2(prefix) + formatProposalFitted(p), keyboard, "MarkdownV2");
@@ -390,18 +427,18 @@ export async function startBot(): Promise<void> {
   // silently sitting there until someone happens to check /status.
   const restored = loadPersistedPending();
   if (restored.pendingApproval) {
-    void announceProposal(restored.pendingApproval, "🔄 Восстановлено после перезапуска:\n\n");
+    void announceProposal(restored.pendingApproval, `${headline("reminder")}: бот перезапускался, предложение всё ещё ждёт ответа\n\n`);
   }
   if (restored.pendingHumanReview) {
     const p = restored.pendingHumanReview;
     void sendNeedsHumanReview(
-      (text, keyboard) => announce("🔄 Восстановлено после перезапуска:\n\n" + text, keyboard),
+      (text, keyboard) => announce(`${headline("reminder")}: бот перезапускался, задача всё ещё ждёт решения\n\n` + text, keyboard),
       { issueKey: p.issueKey, reason: p.reason, costUsd: p.costUsd },
     );
   }
   if (restored.pendingBrief) {
     const p = restored.pendingBrief;
-    void announce("🔄 Восстановлено после перезапуска:\n\n" + formatBrief(p.issueKey, p.brief, p.crossRepo?.stage), briefKeyboard(p.issueKey, p.brief));
+    void announce(`${headline("reminder")}: бот перезапускался, вопрос всё ещё ждёт ответа\n\n` + formatBrief(p.issueKey, p.brief, p.crossRepo?.stage), briefKeyboard(p.issueKey, p.brief));
   }
 
   // A checkpoint left on disk means the process died mid-iteration last run (not a
@@ -413,7 +450,7 @@ export async function startBot(): Promise<void> {
   function announceRecoveredCheckpoints(): void {
     for (const { checkpoint, reason } of recoverOrphanedCheckpoints()) {
       void sendNeedsHumanReview(
-        (text, keyboard) => announce("⚠️ Найдена прерванная перезапуском задача:\n\n" + text, keyboard),
+        (text, keyboard) => announce(`${headline("reminder")}: задача прервалась при перезапуске бота, сделанное сохранено\n\n` + text, keyboard),
         { issueKey: checkpoint.issueKey, reason, costUsd: checkpoint.costUsd },
       );
     }
@@ -526,13 +563,13 @@ export async function startBot(): Promise<void> {
     // Reproduced live: a multi-minute silent gap while Claude reads a real codebase
     // reads as "it's stuck", not "it's thinking" — say so up front, then edit this
     // same message into the finished proposal below.
-    const msg = await ctx.reply(`🔎 Анализирую ${key}, подбираю решение… ⏳`);
+    const msg = await ctx.reply(`${headline("analysis", key)}\nИзучаю код бэкенда и фронтенда и готовлю план — обычно 2–6 минут ⏳`);
     try {
       const outcome = await proposeIssueByKey(key);
       if (outcome.kind === "proposed") {
         const keyboard = new InlineKeyboard()
-          .text("✅ Подтвердить", `confirm:${outcome.proposal.issueKey}`)
-          .text("❌ Отменить", `cancel:${outcome.proposal.issueKey}`);
+          .text(PROPOSAL_BUTTONS.confirm, `confirm:${outcome.proposal.issueKey}`)
+          .text(PROPOSAL_BUTTONS.cancel, `cancel:${outcome.proposal.issueKey}`);
         const text = formatProposalFitted(outcome.proposal);
         const editedOk = await ctx.api
           .editMessageText(ctx.chat!.id, msg.message_id, text, { reply_markup: keyboard, parse_mode: "MarkdownV2" })
@@ -541,12 +578,12 @@ export async function startBot(): Promise<void> {
         if (!editedOk) await sendSafe(ctx.chat!.id, text, keyboard, "MarkdownV2");
       } else if (outcome.kind === "skipped") {
         await ctx.api
-          .editMessageText(ctx.chat!.id, msg.message_id, `⏭️ ${outcome.issueKey}: пропущен (${outcome.reason})`)
-          .catch(() => ctx.reply(`⏭️ ${outcome.issueKey}: пропущен (${outcome.reason})`));
+          .editMessageText(ctx.chat!.id, msg.message_id, fitTelegram(`${headline("skipped", outcome.issueKey)}\n${outcome.reason}`))
+          .catch(() => ctx.reply(fitTelegram(`${headline("skipped", outcome.issueKey)}\n${outcome.reason}`)));
       } else if (outcome.kind === "paused") {
         await ctx.api
-          .editMessageText(ctx.chat!.id, msg.message_id, `⏸ Пауза: ${outcome.reason}`)
-          .catch(() => ctx.reply(`⏸ Пауза: ${outcome.reason}`));
+          .editMessageText(ctx.chat!.id, msg.message_id, `${headline("paused")}\n${outcome.reason}`)
+          .catch(() => ctx.reply(`${headline("paused")}\n${outcome.reason}`));
       } else {
         // awaiting_approval / busy: a narrow residual race between the guards above
         // and proposeIssueByKey's own internal check (there's an `await` in between —
@@ -560,8 +597,8 @@ export async function startBot(): Promise<void> {
       }
     } catch (err) {
       await ctx.api
-        .editMessageText(ctx.chat!.id, msg.message_id, `❌ Ошибка: ${(err as Error).message}`)
-        .catch(() => ctx.reply(`❌ Ошибка: ${(err as Error).message}`));
+        .editMessageText(ctx.chat!.id, msg.message_id, fitTelegram(`${headline("error", key)}\nАнализ не удался: ${(err as Error).message}`))
+        .catch(() => ctx.reply(fitTelegram(`${headline("error", key)}\nАнализ не удался: ${(err as Error).message}`)));
     }
   });
 
@@ -708,9 +745,9 @@ export async function startBot(): Promise<void> {
       await ctx.answerCallbackQuery({ text: "Это предложение уже неактуально.", show_alert: true });
       return;
     }
-    await ctx.answerCallbackQuery({ text: "Запускаю… 🛠️" });
+    await ctx.answerCallbackQuery({ text: "Беру в работу 🛠️" });
     const original = ctx.callbackQuery.message?.text ?? `${key}`;
-    await ctx.editMessageText(original + "\n\n✅ Подтверждено, начинаю работу… 🛠️").catch(() => {});
+    await ctx.editMessageText(fitTelegram(original + "\n\n▶️ Взято в работу. Раз в 5 минут буду писать, что сейчас делаю.")).catch(() => {});
 
     confirmPending()
       .then(async (outcome) => {
@@ -736,7 +773,7 @@ export async function startBot(): Promise<void> {
         // menu again right here keeps it going without that manual nudge.
         await sendTicketMenu(ctx, "Что дальше?");
       })
-      .catch((err: Error) => sendSafe(ctx.chat!.id, `❌ ${key}: не получилось запустить — ${err.message}\nПредложение сохранено, можно нажать «Подтвердить» ещё раз.`));
+      .catch((err: Error) => sendSafe(ctx.chat!.id, `${headline("error", key)}\nНе получилось запустить: ${err.message}\nПредложение сохранено — можно снова нажать «${PROPOSAL_BUTTONS.confirm}».`));
   });
 
   bot.callbackQuery(/^cancel:(.+)$/, async (ctx) => {
@@ -759,9 +796,9 @@ export async function startBot(): Promise<void> {
         timestamp: new Date().toISOString(),
       });
     }
-    await ctx.answerCallbackQuery({ text: "Отменено 🙅" });
+    await ctx.answerCallbackQuery({ text: "Не берём 🙅" });
     const original = ctx.callbackQuery.message?.text ?? `${key}`;
-    await ctx.editMessageText(original + "\n\n❌ Отменено. Не будет предложен повторно до перезапуска бота.").catch(() => {});
+    await ctx.editMessageText(fitTelegram(original + "\n\n✖️ Не берём. Повторно не предложу до перезапуска бота.")).catch(() => {});
     await sendTicketMenu(ctx, "Что дальше?");
   });
 
@@ -774,7 +811,7 @@ export async function startBot(): Promise<void> {
     }
     await ctx.answerCallbackQuery({ text: "Коммичу, пушу, открываю MR…" });
     const original = ctx.callbackQuery.message?.text ?? `${key}`;
-    await ctx.editMessageText(original + "\n\n✅ Принято, пушу… 🛠️").catch(() => {});
+    await ctx.editMessageText(fitTelegram(original + "\n\n🚀 Выбрано: открыть MR. Пушу…")).catch(() => {});
 
     resolveHumanReview(true)
       .then(async (result) => {
@@ -792,14 +829,16 @@ export async function startBot(): Promise<void> {
             durationMs: 0,
             repo: result.repo,
           });
-          await ctx.reply(`✅ ${key}: запушено, ${result.mrUrl}`);
+          await ctx.reply(`${headline("done", key)}\nMR открыт: ${result.mrUrl}\nТикет переведён в Review.`);
         }
         announceRecoveredCheckpoints();
         await sendTicketMenu(ctx, "Что дальше?");
       })
-      .catch((err: Error) => sendSafe(ctx.chat!.id, `❌ ${key}: не удалось принять — ${err.message}\nЗадача по-прежнему ждёт решения, кнопки выше работают.`));
+      .catch((err: Error) => sendSafe(ctx.chat!.id, `${headline("error", key)}\nНе удалось открыть MR: ${err.message}\nЗадача по-прежнему ждёт решения — кнопки выше работают.`));
   });
 
+  // Throwing the work away can't be undone, so the first tap only asks; the buttons
+  // under the same message turn into "yes / no".
   bot.callbackQuery(/^reject_human:(.+)$/, async (ctx) => {
     const key = ctx.match[1];
     const pending = getLiveState().pendingHumanReview;
@@ -807,16 +846,41 @@ export async function startBot(): Promise<void> {
       await ctx.answerCallbackQuery({ text: "Это уже неактуально.", show_alert: true });
       return;
     }
-    await ctx.answerCallbackQuery({ text: "Отклоняю 🙅" });
+    await ctx.answerCallbackQuery({ text: "Точно выбросить? Подтверди кнопкой." });
+    const confirm = new InlineKeyboard()
+      .text(DECISION_BUTTONS.confirmReject, `reject_human_yes:${key}`)
+      .text(DECISION_BUTTONS.keep, `reject_human_no:${key}`);
+    await ctx.editMessageReplyMarkup({ reply_markup: confirm }).catch(() => {});
+  });
+
+  bot.callbackQuery(/^reject_human_no:(.+)$/, async (ctx) => {
+    const key = ctx.match[1];
+    const pending = getLiveState().pendingHumanReview;
+    if (!pending || pending.issueKey !== key) {
+      await ctx.answerCallbackQuery({ text: "Это уже неактуально.", show_alert: true });
+      return;
+    }
+    await ctx.answerCallbackQuery({ text: "Оставляю как есть" });
+    await ctx.editMessageReplyMarkup({ reply_markup: decisionKeyboard(key, Boolean(pending.resumeState)) }).catch(() => {});
+  });
+
+  bot.callbackQuery(/^reject_human_yes:(.+)$/, async (ctx) => {
+    const key = ctx.match[1];
+    const pending = getLiveState().pendingHumanReview;
+    if (!pending || pending.issueKey !== key) {
+      await ctx.answerCallbackQuery({ text: "Это уже неактуально.", show_alert: true });
+      return;
+    }
+    await ctx.answerCallbackQuery({ text: "Выбрасываю 🗑" });
     const original = ctx.callbackQuery.message?.text ?? `${key}`;
-    await ctx.editMessageText(original + "\n\n❌ Отклонено, worktree удалён, тикет возвращён в «Сделать».").catch(() => {});
+    await ctx.editMessageText(fitTelegram(original + "\n\n🗑 Выброшено: работа удалена, тикет возвращён в «Сделать».")).catch(() => {});
 
     resolveHumanReview(false)
       .then(() => {
         announceRecoveredCheckpoints();
         return sendTicketMenu(ctx, "Что дальше?");
       })
-      .catch((err: Error) => sendSafe(ctx.chat!.id, `❌ ${key}: не удалось отклонить — ${err.message}\nЗадача по-прежнему ждёт решения, кнопки выше работают.`));
+      .catch((err: Error) => sendSafe(ctx.chat!.id, `${headline("error", key)}\nНе удалось выбросить: ${err.message}\nЗадача по-прежнему ждёт решения — кнопки выше работают.`));
   });
 
   bot.callbackQuery(/^continue_human:(.+)$/, async (ctx) => {
@@ -826,10 +890,10 @@ export async function startBot(): Promise<void> {
       await ctx.answerCallbackQuery({ text: "Это уже неактуально.", show_alert: true });
       return;
     }
-    const how = pending.resumeState.freshSession ? "новой сессией" : "с того же места";
-    await ctx.answerCallbackQuery({ text: `Продолжаю ${how}… 🛠️` });
+    const how = pending.resumeState.freshSession ? "в новой сессии" : "с того же места";
+    await ctx.answerCallbackQuery({ text: `Дорабатываю ${how}… 🛠️` });
     const original = ctx.callbackQuery.message?.text ?? `${key}`;
-    await ctx.editMessageText(fitTelegram(original + `\n\n🔄 Продолжаю ${how}… 🛠️`)).catch(() => {});
+    await ctx.editMessageText(fitTelegram(original + `\n\n🔄 Выбрано: доработать. Агент продолжает ${how}, раз в 5 минут буду писать, что делает.`)).catch(() => {});
 
     continueNeedsHuman()
       .then(async (outcome) => {
@@ -850,7 +914,7 @@ export async function startBot(): Promise<void> {
         }
         await sendTicketMenu(ctx, "Что дальше?");
       })
-      .catch((err: Error) => sendSafe(ctx.chat!.id, `❌ ${key}: не удалось продолжить — ${err.message}`));
+      .catch((err: Error) => sendSafe(ctx.chat!.id, `${headline("error", key)}\nНе удалось продолжить: ${err.message}`));
   });
 
   bot.callbackQuery(/^brief_answer:([^:]+):(\d+)$/, async (ctx) => {
@@ -864,7 +928,7 @@ export async function startBot(): Promise<void> {
     const chosenLabel = pending.brief.options[chosenIndex]?.label ?? `вариант ${chosenIndex + 1}`;
     await ctx.answerCallbackQuery({ text: "Продолжаю…" });
     const original = ctx.callbackQuery.message?.text ?? `${key}`;
-    await ctx.editMessageText(original + `\n\n✅ Выбрано: ${chosenLabel}. Продолжаю работу… 🛠️`).catch(() => {});
+    await ctx.editMessageText(fitTelegram(original + `\n\n✅ Выбрано: ${chosenLabel}. Продолжаю работу.`)).catch(() => {});
 
     resolveBrief(chosenIndex)
       .then(async (outcome) => {

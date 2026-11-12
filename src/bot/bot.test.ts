@@ -74,15 +74,33 @@ test("fitTelegram leaves short text alone and marks what it cut", () => {
 });
 
 test("composeNeedsHumanText always fits, however long the reason and the diff are", () => {
-  const text = composeNeedsHumanText({ issueKey: "XEN-540", reason: "review_blocked: " + "длинное замечание ".repeat(400), costUsd: 13.02 }, "diff --git a/x b/x\n" + "+line\n".repeat(5000));
+  const diff = Array.from({ length: 40 }, (_, i) => `diff --git a/src/f${i}.ts b/src/f${i}.ts\n` + "+line\n".repeat(200)).join("");
+  const text = composeNeedsHumanText({ issueKey: "XEN-540", reason: "review_blocked: " + "длинное замечание ".repeat(400), costUsd: 13.02 }, diff);
   assert.ok(text.length <= 4000, `got ${text.length}`);
   assert.match(text, /XEN-540/);
-  assert.match(text, /diff --git/);
+  // A file list with totals, never the raw diff.
+  assert.match(text, /40 файл\(ов\), \+8000 −0/);
+  assert.doesNotMatch(text, /diff --git/);
 });
 
-test("composeNeedsHumanText says so when the diff is empty, and is just the header without one", () => {
-  assert.match(composeNeedsHumanText({ issueKey: "X-1", reason: "stuck", costUsd: 1 }, "  "), /diff пустой/);
-  assert.doesNotMatch(composeNeedsHumanText({ issueKey: "X-1", reason: "stuck", costUsd: 1 }, null), /diff/);
+test("composeNeedsHumanText: no changes means no 'open MR' option; no diff at all means just the header", () => {
+  const empty = composeNeedsHumanText({ issueKey: "X-1", reason: "stuck", costUsd: 1 }, "  ");
+  assert.match(empty, /изменений в коде нет/);
+  assert.doesNotMatch(empty, /Открыть MR/);
+  assert.doesNotMatch(composeNeedsHumanText({ issueKey: "X-1", reason: "stuck", costUsd: 1 }, null), /Сделано/);
+});
+
+// XEN-381, live: the raw git/harness reason was the whole message.
+test("composeNeedsHumanText explains a stop in plain words and never shows the raw reason", () => {
+  const reason = "rebase_conflict (dev moved on while this was paused, and the two don't merge cleanly): error: Entry 'docs/a.md' not uptodate. Cannot merge.";
+  const text = composeNeedsHumanText({ issueKey: "XEN-381", reason, costUsd: 10.87 }, "diff --git a/docs/a.md b/docs/a.md\nnew file mode 100644\n+x\n", { canContinue: false, title: "Активные клиенты", budgetUsd: 20 });
+  assert.match(text, /^⚠️ НУЖНО ТВОЁ РЕШЕНИЕ · XEN-381\nАктивные клиенты/);
+  assert.match(text, /Что случилось: Пока задача стояла на паузе/);
+  assert.match(text, /Потрачено: \$10\.87 из \$20\.00/);
+  assert.match(text, /новый docs\/a\.md/);
+  assert.doesNotMatch(text, /rebase_conflict|uptodate|Cannot merge/);
+  assert.doesNotMatch(text, /Доработать/);
+  assert.match(composeNeedsHumanText({ issueKey: "X", reason: "context_budget: ~225k", costUsd: 1 }, "", { canContinue: true }), /Доработать/);
 });
 
 test("formatProposalFitted shrinks an oversized proposal under Telegram's limit and keeps the key", () => {
@@ -110,7 +128,37 @@ test("formatProposalFitted leaves a normal proposal exactly as formatProposal ma
 test("plainFromMarkdownV2 gives readable plain text back from an escaped proposal", () => {
   const p: Proposal = { issueKey: "X-1", title: "fix a.b (now)", repo: "backend", descriptionShort: "d", plan: "use `x`", acceptanceCriteria: ["c-1"], costUsd: 0.1, costEstimate: null };
   const plain = plainFromMarkdownV2(formatProposal(p));
-  assert.match(plain, /X-1: fix a\.b \(now\)/);
+  assert.match(plain, /📋 ПРЕДЛОЖЕНИЕ · X-1\nfix a\.b \(now\)/);
   assert.doesNotMatch(plain, /\\/);
   assert.doesNotMatch(plain, /\|\|/);
+});
+
+test("formatProposal is short: category line, where, one-line plan, criteria count; the rest collapsed", () => {
+  const p: Proposal = {
+    issueKey: "XEN-381",
+    title: "Активные клиенты",
+    repo: "backend",
+    descriptionShort: "длинное описание тикета ".repeat(20),
+    plan: "Эндпоинта на бэкенде нет. Добавлю контроллер и сервис. " + "Подробности реализации. ".repeat(40) + "\n\nРепозиторий фронтенд не трогаю: страница уже есть в dev",
+    acceptanceCriteria: ["a", "b", "c"],
+    costUsd: 1.17,
+    costEstimate: null,
+  };
+  const text = formatProposal(p);
+  const visible = text.split("\n**>")[0];
+  assert.ok(visible.length < 700, `visible part is ${visible.length} chars`);
+  assert.match(visible, /📋 ПРЕДЛОЖЕНИЕ · \*XEN\\-381\*/);
+  assert.match(visible, /Где: бэкенд/);
+  assert.match(visible, /Не трогаю: фронтенд — страница уже есть в dev/);
+  assert.match(visible, /Критерии приёмки: 3/);
+  assert.doesNotMatch(visible, /длинное описание/);
+  assert.match(text, /Подробности реализации/);
+  assertReservedCharsEscaped(text);
+});
+
+test("formatProposal prefers the analysis's plain summary over the plan's first sentences", () => {
+  const p: Proposal = { ...baseProposal, plan: "Технический план с `путями/к/файлам.ts`.", summary: "добавлю список активных клиентов" };
+  const visible = plainFromMarkdownV2(formatProposal(p)).split("💡")[0];
+  assert.match(visible, /Что сделаю: добавлю список активных клиентов/);
+  assert.doesNotMatch(visible, /путями/);
 });

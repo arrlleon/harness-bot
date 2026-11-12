@@ -21,6 +21,9 @@ export type RepoScope = RepoKind | "cross";
 export interface RepoVerdict {
   needsChanges: boolean;
   plan: string;
+  // One plain sentence for the CEO — the proposal's "что сделаю" line. Empty when the
+  // model didn't write one; the proposal then falls back to the plan's first sentences.
+  summary: string;
   acceptanceCriteria: string[];
   // Why this repo is out of scope — only set when needsChanges is false.
   reason?: string;
@@ -31,6 +34,7 @@ export interface ScopeAnalysis {
   // null: both turns found nothing to change. The caller must not start work.
   scope: RepoScope | null;
   plan: string;
+  summary: string;
   acceptanceCriteria: string[];
   costUsd: number;
   // One line per repo left out of scope, for the human-visible proposal.
@@ -88,6 +92,10 @@ export function buildScopePrompt(task: TaskSpec, thisRepo: RepoKind, otherRepoPa
     `Если менять нужно — опиши только часть ${thisRepo}; вторую половину отдельно`,
     "проанализируют и сделают по второму репозиторию. Ответь строго в этом формате, на русском:",
     "",
+    "КОРОТКО: <одно предложение для руководителя, до 20 слов: что появится или исправится —",
+    "без путей к файлам, имён классов и кода; пример: «добавлю на бэкенде список активных клиентов",
+    "с фильтрами и сводкой по модулям»>",
+    "",
     "ПЛАН:",
     "<2-4 коротких предложения: в чём проблема и что именно ты планируешь изменить в этом репозитории;",
     "если на стыке меняется контракт — назови его точно (путь, поля, типы)>",
@@ -100,13 +108,16 @@ export function buildScopePrompt(task: TaskSpec, thisRepo: RepoKind, otherRepoPa
   ].join("\n");
 }
 
+const SUMMARY_LINE = /^[ \t]*коротко\s*:\s*(.+)$/im;
+
 export function parseRepoVerdict(text: string, costUsd: number): RepoVerdict {
   const reason = parseNoChangesSignal(text);
-  if (reason !== null) return { needsChanges: false, plan: "", acceptanceCriteria: [], reason, costUsd };
+  if (reason !== null) return { needsChanges: false, plan: "", summary: "", acceptanceCriteria: [], reason, costUsd };
   // Seen live: the model mirrors the opt-out line with an "ИЗМЕНЕНИЯ: НУЖНЫ" of its own
   // before the plan. Not asked for, and it would otherwise open the plan shown to the human.
+  const summary = SUMMARY_LINE.exec(text)?.[1].replace(/^[«"\s]+|[»".\s]+$/g, "") ?? "";
   const { plan, acceptanceCriteria } = parseProposalResponse(stripPreamble(text.replace(/^\s*изменения\s*:\s*нужны[^\n]*\n+/i, "")));
-  return { needsChanges: true, plan, acceptanceCriteria, costUsd };
+  return { needsChanges: true, plan, summary, acceptanceCriteria, costUsd };
 }
 
 // Both repos in scope: plan and criteria carry the "[backend]"/"[frontend]" prefixes
@@ -118,6 +129,7 @@ export function combineVerdicts(backend: RepoVerdict, frontend: RepoVerdict): Sc
     return {
       scope: "cross",
       plan: `[backend]\n${backend.plan}\n\n[frontend]\n${frontend.plan}`,
+      summary: backend.summary && frontend.summary ? `бэкенд — ${backend.summary}; фронтенд — ${frontend.summary}` : "",
       acceptanceCriteria: [
         ...backend.acceptanceCriteria.map((c) => `[backend] ${c}`),
         ...frontend.acceptanceCriteria.map((c) => `[frontend] ${c}`),
@@ -131,10 +143,11 @@ export function combineVerdicts(backend: RepoVerdict, frontend: RepoVerdict): Sc
     .filter((repo) => !verdicts[repo].needsChanges)
     .map((repo) => ({ repo, reason: verdicts[repo].reason ?? "причина не указана" }));
   const only = backend.needsChanges ? "backend" : frontend.needsChanges ? "frontend" : null;
-  if (!only) return { scope: null, plan: "", acceptanceCriteria: [], costUsd, skippedRepos };
+  if (!only) return { scope: null, plan: "", summary: "", acceptanceCriteria: [], costUsd, skippedRepos };
   return {
     scope: only,
     plan: verdicts[only].plan,
+    summary: verdicts[only].summary,
     acceptanceCriteria: verdicts[only].acceptanceCriteria,
     costUsd,
     skippedRepos,
