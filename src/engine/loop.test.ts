@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { reviewResumeNowUnsafe } from "./loop.js";
+import { reviewResumeNowUnsafe, withFixResumeState } from "./loop.js";
+import type { CloseLoopResult } from "../types.js";
 
 test("reviewResumeNowUnsafe is false when there's nothing being resumed", () => {
   assert.equal(reviewResumeNowUnsafe(undefined, { maxRounds: 3 }), false);
@@ -26,4 +27,49 @@ test("reviewResumeNowUnsafe is true when MAX_REVIEW_ROUNDS was lowered below the
 
 test("reviewResumeNowUnsafe is false at the boundary: resuming round equals the current maxRounds", () => {
   assert.equal(reviewResumeNowUnsafe({ round: 2 }, { maxRounds: 2 }), false);
+});
+
+// "🛠 Решить самому" needs something to resume from on every stop, not just the two
+// that used to carry it (context_budget, agent_error).
+function failed(stopReason: CloseLoopResult["stopReason"], extra: Partial<CloseLoopResult> = {}): CloseLoopResult {
+  return {
+    task: { id: "X-1", title: "t", description: "", acceptanceCriteria: [] },
+    success: false,
+    iterations: [],
+    totalCostUsd: 12.5,
+    stopReason,
+    worktreeDir: "/tmp/wt",
+    ...extra,
+  } as CloseLoopResult;
+}
+const setup = { gates: [{ name: "test", command: "jest" }], baselines: [], acceptanceTestPath: "src/__acceptance__/x.spec.ts" };
+
+test("withFixResumeState gives every failed stop a fresh-session resume state", () => {
+  for (const reason of ["max_iterations", "stuck", "review_blocked", "max_budget", "gate_integrity_violation", "rebase_conflict"] as const) {
+    const rs = withFixResumeState(failed(reason), setup).resumeState;
+    assert.ok(rs, reason);
+    assert.equal(rs!.freshSession, true);
+    assert.equal(rs!.iteration, 0);
+    assert.equal(rs!.totalCostUsd, 12.5);
+    assert.equal(rs!.worktreeDir, "/tmp/wt");
+    assert.equal(rs!.acceptanceTestPath, "src/__acceptance__/x.spec.ts");
+  }
+});
+
+test("withFixResumeState carries the last attempt's failing gates", () => {
+  const iterations = [
+    { turn: {} as never, verify: { passed: false, output: "", gates: [{ name: "test", command: "jest", passed: false, output: "boom" }, { name: "build", command: "b", passed: true, output: "" }] } },
+  ];
+  const rs = withFixResumeState(failed("max_iterations", { iterations }), setup).resumeState!;
+  assert.deepEqual(rs.failedGates?.map((g) => g.name), ["test"]);
+});
+
+test("withFixResumeState leaves success, briefs, existing resume states and unknown setups alone", () => {
+  const ok = { ...failed("verified"), success: true };
+  assert.equal(withFixResumeState(ok, setup), ok);
+  const brief = failed("brief_pending");
+  assert.equal(withFixResumeState(brief, setup).resumeState, undefined);
+  const own = failed("agent_error", { resumeState: { sessionId: "s", worktreeDir: "/tmp/wt", iteration: 2, totalCostUsd: 1, gates: [], baselines: [] } });
+  assert.equal(withFixResumeState(own, setup).resumeState!.sessionId, "s");
+  assert.equal(withFixResumeState(failed("stuck"), {}).resumeState, undefined);
 });

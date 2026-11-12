@@ -34,6 +34,9 @@ import {
   resolveBrief,
   type Proposal,
   type Candidate,
+  autoFixNeedsHuman,
+  canAutoFix,
+  isPushFailure,
 } from "../queue.js";
 import { killCurrentTurn, runClaudeTurn } from "../engine/claudeEngine.js";
 import type { QueueRunOutcome, Brief } from "../types.js";
@@ -254,18 +257,18 @@ export function plainFromMarkdownV2(text: string): string {
 export function composeNeedsHumanText(
   outcome: { issueKey: string; reason: string; costUsd: number },
   diff: string | null,
-  opts: { canContinue?: boolean; title?: string; budgetUsd?: number } = {},
+  opts: { canAutoFix?: boolean; title?: string; budgetUsd?: number } = {},
 ): string {
   return fitTelegram(
-    composeDecisionText({ ...outcome, title: opts.title, budgetUsd: opts.budgetUsd }, diff, opts.canContinue ?? false),
+    composeDecisionText({ ...outcome, title: opts.title, budgetUsd: opts.budgetUsd }, diff, opts.canAutoFix ?? false),
   );
 }
 
-export function decisionKeyboard(issueKey: string, canContinue: boolean, hasWork = true): InlineKeyboard {
+export function decisionKeyboard(issueKey: string, canFix: boolean, hasWork = true): InlineKeyboard {
   const keyboard = new InlineKeyboard();
+  if (canFix) keyboard.text(DECISION_BUTTONS.autoFix, `autofix_human:${issueKey}`).row();
   if (hasWork) keyboard.text(DECISION_BUTTONS.accept, `accept_human:${issueKey}`);
-  if (canContinue) keyboard.text(DECISION_BUTTONS.continue, `continue_human:${issueKey}`);
-  return keyboard.row().text(DECISION_BUTTONS.reject, `reject_human:${issueKey}`);
+  return keyboard.text(DECISION_BUTTONS.reject, `reject_human:${issueKey}`);
 }
 
 // needs_human doesn't mean the work is wrong — XEN-364 reproduced a case where a fully
@@ -290,13 +293,13 @@ async function sendNeedsHumanReview(
     await send(composeNeedsHumanText(outcome, null));
     return;
   }
-  // "Доработать" exists only where the harness can actually resume the task: a
-  // context_budget or agent_error stop on a single-repo task (see queue.ts's commented-
-  // out cross-repo resumeState assignments for why cross-repo has no resume).
-  const canContinue = Boolean(pending.resumeState);
+  // "Решить самому" exists wherever the harness can act on its own: any stop with a
+  // resume state (every single-repo stop, see loop.ts withFixResumeState; cross-repo
+  // halves deliberately carry none) or a push/MR failure, which is just retried.
+  const canFix = canAutoFix(pending);
   const hasWork = diff === null || diff.trim().length > 0;
-  const text = composeNeedsHumanText(outcome, diff, { canContinue, title: pending.title, budgetUsd: config.maxBudgetUsd });
-  await send(text, decisionKeyboard(outcome.issueKey, canContinue, hasWork));
+  const text = composeNeedsHumanText(outcome, diff, { canAutoFix: canFix, title: pending.title, budgetUsd: config.maxBudgetUsd });
+  await send(text, decisionKeyboard(outcome.issueKey, canFix, hasWork));
 }
 
 export async function startBot(): Promise<void> {
@@ -812,7 +815,12 @@ export async function startBot(): Promise<void> {
     await ctx.answerCallbackQuery({ text: "Коммичу, пушу, открываю MR…" });
     const original = ctx.callbackQuery.message?.text ?? `${key}`;
     await ctx.editMessageText(fitTelegram(original + "\n\n🚀 Выбрано: открыть MR. Пушу…")).catch(() => {});
+    openMrForPending(ctx, key);
+  });
 
+  // Shared by "🚀 Открыть MR как есть" and by "🛠 Решить самому" on a push/MR failure
+  // (where retrying the push is the whole fix).
+  function openMrForPending(ctx: Context, key: string): void {
     resolveHumanReview(true)
       .then(async (result) => {
         if (!result) return;
@@ -835,6 +843,45 @@ export async function startBot(): Promise<void> {
         await sendTicketMenu(ctx, "Что дальше?");
       })
       .catch((err: Error) => sendSafe(ctx.chat!.id, `${headline("error", key)}\nНе удалось открыть MR: ${err.message}\nЗадача по-прежнему ждёт решения — кнопки выше работают.`));
+  }
+
+  bot.callbackQuery(/^autofix_human:(.+)$/, async (ctx) => {
+    const key = ctx.match[1];
+    const pending = getLiveState().pendingHumanReview;
+    if (!pending || pending.issueKey !== key || !canAutoFix(pending)) {
+      await ctx.answerCallbackQuery({ text: "Это уже неактуально.", show_alert: true });
+      return;
+    }
+    const original = ctx.callbackQuery.message?.text ?? `${key}`;
+    if (isPushFailure(pending.reason)) {
+      await ctx.answerCallbackQuery({ text: "Повторяю пуш и открытие MR…" });
+      await ctx.editMessageText(fitTelegram(original + "\n\n🛠 Выбрано: решить самому. Повторяю пуш и открытие MR…")).catch(() => {});
+      openMrForPending(ctx, key);
+      return;
+    }
+    await ctx.answerCallbackQuery({ text: "Беру в работу 🛠" });
+    await ctx.editMessageText(fitTelegram(original + "\n\n🛠 Выбрано: решить самому. Агент взялся, раз в 5 минут буду писать, что делает.")).catch(() => {});
+
+    autoFixNeedsHuman()
+      .then(async (outcome) => {
+        if (!outcome) return;
+        recordOutcome(state, outcome);
+        if (outcome.kind === "needs_human") {
+          await sendNeedsHumanReview(senderFor(ctx.chat!.id), outcome);
+        } else if (outcome.kind === "brief_pending") {
+          const next = getLiveState().pendingBrief;
+          if (next)
+            await ctx.reply(formatBrief(next.issueKey, next.brief, next.crossRepo?.stage), {
+              reply_markup: briefKeyboard(next.issueKey, next.brief),
+            });
+          return;
+        } else {
+          const text = describeOutcome(outcome);
+          if (text) await senderFor(ctx.chat!.id)(text);
+        }
+        await sendTicketMenu(ctx, "Что дальше?");
+      })
+      .catch((err: Error) => sendSafe(ctx.chat!.id, `${headline("error", key)}\nНе удалось взяться: ${err.message}`));
   });
 
   // Throwing the work away can't be undone, so the first tap only asks; the buttons
@@ -861,7 +908,7 @@ export async function startBot(): Promise<void> {
       return;
     }
     await ctx.answerCallbackQuery({ text: "Оставляю как есть" });
-    await ctx.editMessageReplyMarkup({ reply_markup: decisionKeyboard(key, Boolean(pending.resumeState)) }).catch(() => {});
+    await ctx.editMessageReplyMarkup({ reply_markup: decisionKeyboard(key, canAutoFix(pending)) }).catch(() => {});
   });
 
   bot.callbackQuery(/^reject_human_yes:(.+)$/, async (ctx) => {

@@ -93,14 +93,17 @@ test("composeNeedsHumanText: no changes means no 'open MR' option; no diff at al
 // XEN-381, live: the raw git/harness reason was the whole message.
 test("composeNeedsHumanText explains a stop in plain words and never shows the raw reason", () => {
   const reason = "rebase_conflict (dev moved on while this was paused, and the two don't merge cleanly): error: Entry 'docs/a.md' not uptodate. Cannot merge.";
-  const text = composeNeedsHumanText({ issueKey: "XEN-381", reason, costUsd: 10.87 }, "diff --git a/docs/a.md b/docs/a.md\nnew file mode 100644\n+x\n", { canContinue: false, title: "Активные клиенты", budgetUsd: 20 });
+  const text = composeNeedsHumanText({ issueKey: "XEN-381", reason, costUsd: 10.87 }, "diff --git a/docs/a.md b/docs/a.md\nnew file mode 100644\n+x\n", { canAutoFix: false, title: "Активные клиенты", budgetUsd: 20 });
   assert.match(text, /^⚠️ НУЖНО ТВОЁ РЕШЕНИЕ · XEN-381\nАктивные клиенты/);
   assert.match(text, /Что случилось: Пока задача стояла на паузе/);
   assert.match(text, /Потрачено: \$10\.87 из \$20\.00/);
   assert.match(text, /новый docs\/a\.md/);
   assert.doesNotMatch(text, /rebase_conflict|uptodate|Cannot merge/);
-  assert.doesNotMatch(text, /Доработать/);
-  assert.match(composeNeedsHumanText({ issueKey: "X", reason: "context_budget: ~225k", costUsd: 1 }, "", { canContinue: true }), /Доработать/);
+  assert.doesNotMatch(text, /Решить самому/);
+  assert.match(
+    composeNeedsHumanText({ issueKey: "X", reason: reason, costUsd: 1 }, "", { canAutoFix: true }),
+    /🛠 Решить самому — волью свежий dev в ветку, агент сам разрулит конфликты/,
+  );
 });
 
 test("formatProposalFitted shrinks an oversized proposal under Telegram's limit and keeps the key", () => {

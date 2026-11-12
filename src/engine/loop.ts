@@ -352,7 +352,48 @@ async function runPostImplementSuccess(
   };
 }
 
+interface LoopSetup {
+  gates?: GateSpec[];
+  baselines?: GateBaseline[];
+  extraDeniedPaths?: string[];
+  acceptanceTestPath?: string;
+}
+
+// Every stop that leaves work in a worktree can be picked up again by "🛠 Решить
+// самому" (queue.ts autoFixNeedsHuman) — a fresh session, fed the diff and whatever
+// went wrong. Only context_budget and agent_error used to carry a resume state, so
+// every other stop could only be pushed as is or thrown away.
+export function withFixResumeState(result: CloseLoopResult, setup: LoopSetup): CloseLoopResult {
+  if (result.success || result.resumeState || result.stopReason === "brief_pending") return result;
+  if (!setup.gates || !setup.baselines) return result;
+  const last = result.iterations[result.iterations.length - 1];
+  return {
+    ...result,
+    resumeState: {
+      sessionId: "",
+      worktreeDir: result.worktreeDir,
+      iteration: 0,
+      totalCostUsd: result.totalCostUsd,
+      gates: setup.gates,
+      baselines: setup.baselines,
+      extraDeniedPaths: setup.extraDeniedPaths,
+      acceptanceTestPath: result.acceptanceTestPath ?? setup.acceptanceTestPath,
+      freshSession: true,
+      failedGates: last?.verify.gates.filter((g) => !g.passed).map((g) => ({ ...g, output: g.output.slice(0, 4000) })),
+    },
+  };
+}
+
 export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promise<CloseLoopResult> {
+  const setup: LoopSetup = {};
+  if (config.resumeFrom) {
+    const rf = config.resumeFrom;
+    Object.assign(setup, { gates: rf.gates, baselines: rf.baselines, extraDeniedPaths: rf.extraDeniedPaths, acceptanceTestPath: rf.acceptanceTestPath });
+  }
+  return withFixResumeState(await runCloseLoopInner(task, config, setup), setup);
+}
+
+async function runCloseLoopInner(task: TaskSpec, config: EngineConfig, setup: LoopSetup): Promise<CloseLoopResult> {
   // config.resumeFrom?.worktreeDir takes priority: resuming a brief (main loop, review
   // round, or cross-repo) must reuse the exact worktree the paused session's
   // uncommitted work is sitting in. createWorktree() force-removes and recreates
@@ -381,7 +422,7 @@ export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promis
   // context to resolve a real conflict than another blind retry would, and the
   // worktree is already back in its clean pre-rebase state (rebaseOntoFreshBase aborts
   // on failure), so nothing here is left half-done.
-  if (config.resumeFrom && config.freshBase) {
+  if (config.resumeFrom && config.freshBase && !config.resumeFrom.skipRebase) {
     const rebase = await rebaseOntoFreshBase(worktreeDir, config.freshBase.baseBranch);
     if (rebase.conflict) {
       return {
@@ -515,6 +556,7 @@ export async function runCloseLoop(task: TaskSpec, config: EngineConfig): Promis
     startIteration = 0;
   }
 
+  Object.assign(setup, { gates, baselines, extraDeniedPaths, acceptanceTestPath });
   const iterations: CloseLoopIteration[] = [];
 
   for (let i = startIteration; i < config.maxIterations; i++) {

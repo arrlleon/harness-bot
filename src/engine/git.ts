@@ -122,6 +122,29 @@ export async function rebaseOntoFreshBase(worktreeDir: string, targetBranch: str
   }
 }
 
+// The "🛠 Решить самому" answer to a rebase conflict (queue.ts autoFixNeedsHuman):
+// instead of replaying the task onto the new dev, merge dev INTO the task branch, so a
+// conflict becomes ordinary file content the agent can fix. The task's own work is
+// committed first; on conflict the merge is committed with its markers left in place,
+// so the worktree is never left mid-merge — every later step (diff, gates, review,
+// commitAll) sees a normal branch, and the agent's job is to remove the markers.
+export async function mergeFreshBase(worktreeDir: string, targetBranch: string): Promise<{ conflictedFiles: string[] }> {
+  await execFileAsync("git", ["reset", "-q"], { cwd: worktreeDir }); // drop intent-to-add entries (see rebaseOntoFreshBase)
+  await execFileAsync("git", ["fetch", "origin", targetBranch], { cwd: worktreeDir });
+  await commitAll(worktreeDir, "WIP: работа задачи перед слиянием свежего dev\n\nAutomated by jira-harness.");
+  try {
+    await execFileAsync("git", ["merge", "--no-edit", `origin/${targetBranch}`], { cwd: worktreeDir });
+    return { conflictedFiles: [] };
+  } catch (err) {
+    const { stdout } = await execFileAsync("git", ["diff", "--name-only", "--diff-filter=U"], { cwd: worktreeDir });
+    const conflictedFiles = stdout.split("\n").filter(Boolean);
+    if (conflictedFiles.length === 0) throw err; // failed for a reason other than conflicts
+    await execFileAsync("git", ["add", "-A"], { cwd: worktreeDir });
+    await execFileAsync("git", ["commit", "--no-edit", "-m", `Merge origin/${targetBranch} (конфликты в ${conflictedFiles.length} файл(ах) — разрешает агент)`], { cwd: worktreeDir });
+    return { conflictedFiles };
+  }
+}
+
 export async function removeWorktree(repoPath: string, worktreeDir: string): Promise<void> {
   await execFileAsync("git", ["worktree", "remove", "--force", worktreeDir], { cwd: repoPath });
 }

@@ -16,6 +16,7 @@ import {
   restorePathsFromCommit,
   fetchFreshBase,
   rebaseOntoFreshBase,
+  mergeFreshBase,
 } from "./git.js";
 
 const execFileAsync = promisify(execFile);
@@ -516,6 +517,47 @@ test("rebaseOntoFreshBase survives new files left as intent-to-add by getWorktre
     assert.equal(await readFile(join(dir, "brand-new.ts"), "utf8"), "export const x = 1;\n");
     assert.equal(await readFile(join(dir, "README.md"), "utf8"), "initial\nedited in the worktree\n");
     assert.equal(await readFile(join(dir, "unrelated.txt"), "utf8"), "dev moved on\n");
+  } finally {
+    await cleanup(local, branch);
+    await rm(origin, { recursive: true, force: true });
+  }
+});
+
+// "🛠 Решить самому" on a rebase conflict: dev is merged in, and a conflict becomes
+// committed file content with markers for the agent to fix — never a half-done merge.
+test("mergeFreshBase leaves a real conflict as committed markers and lists the files", async () => {
+  const { origin, local } = await makeRepoWithRemote();
+  const branch = uniqueBranch();
+  try {
+    const dir = await createWorktree(local, branch);
+    await writeFile(join(dir, "README.md"), "initial\ntask version\n");
+    await writeFile(join(dir, "task-only.ts"), "export const t = 1;\n");
+    await pushDirectlyToOrigin(origin, "initial\ndev version\n");
+
+    const { conflictedFiles } = await mergeFreshBase(dir, "dev");
+    assert.deepEqual(conflictedFiles, ["README.md"]);
+    const readme = await readFile(join(dir, "README.md"), "utf8");
+    assert.match(readme, /<<<<<<<[\s\S]*task version[\s\S]*=======[\s\S]*dev version[\s\S]*>>>>>>>/);
+    const { stdout: status } = await execFileAsync("git", ["status", "--porcelain"], { cwd: dir });
+    assert.equal(status.trim(), "", "nothing left uncommitted or mid-merge");
+    await assert.rejects(execFileAsync("git", ["rev-parse", "-q", "--verify", "MERGE_HEAD"], { cwd: dir }));
+    assert.equal(await readFile(join(dir, "task-only.ts"), "utf8"), "export const t = 1;\n");
+  } finally {
+    await cleanup(local, branch);
+    await rm(origin, { recursive: true, force: true });
+  }
+});
+
+test("mergeFreshBase merges cleanly when dev's changes don't overlap", async () => {
+  const { origin, local } = await makeRepoWithRemote();
+  const branch = uniqueBranch();
+  try {
+    const dir = await createWorktree(local, branch);
+    await writeFile(join(dir, "task-only.ts"), "export const t = 1;\n");
+    await pushDirectlyToOrigin(origin, "initial\ndev version\n");
+    const { conflictedFiles } = await mergeFreshBase(dir, "dev");
+    assert.deepEqual(conflictedFiles, []);
+    assert.equal(await readFile(join(dir, "README.md"), "utf8"), "initial\ndev version\n");
   } finally {
     await cleanup(local, branch);
     await rm(origin, { recursive: true, force: true });

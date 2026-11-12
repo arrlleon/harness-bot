@@ -76,3 +76,11 @@ test("composeProgressText leads with what is happening now, then stage, attempt,
   assert.match(text, /Идёт 15 мин · потрачено \$6\.20 из \$20\.00/);
   assert.match(text, /обновлено в 11:15/);
 });
+
+test("explainStop says what 'Решить самому' will do for every kind of stop", () => {
+  assert.match(explainStop("rebase_conflict: x").fix, /волью свежий dev/);
+  assert.match(explainStop("review_blocked: x").fix, /исправит замечания ревью/);
+  assert.match(explainStop("push/MR failed: 403").fix, /повторю пуш/);
+  assert.match(explainStop("max_budget").fix, /ещё один бюджет/);
+  assert.match(explainStop("неизвестно что").fix, /новая сессия/);
+});

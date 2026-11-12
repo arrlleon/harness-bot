@@ -37,6 +37,8 @@ export interface StopExplanation {
   why: string;
   // Whether the "continue with the agent" button makes sense for this kind of stop.
   continueUseful: boolean;
+  // What "🛠 Решить самому" will do about it, in one line.
+  fix: string;
 }
 
 // The reason strings come from queue.ts (buildFailureReason, escalateFailure, the
@@ -60,30 +62,35 @@ export function explainStop(reason: string): StopExplanation {
     return {
       why: `У агента переполнилась память сессии — дальше он начал бы путаться.${gates ? ` Не проходят проверки: ${gateNames(gates)}.` : ""}`,
       continueUseful: true,
+      fix: "агент продолжит в новой сессии с уже сделанного и доведёт проверки",
     };
   }
-  if (r.startsWith("max_budget")) return { why: "Закончился бюджет на задачу, работа не доведена до конца.", continueUseful: false };
-  if (r.startsWith("max_iterations")) return { why: "Агент исчерпал попытки, а проверки так и не прошли.", continueUseful: false };
+  if (r.startsWith("max_budget")) return { why: "Закончился бюджет на задачу, работа не доведена до конца.", continueUseful: false, fix: "дам агенту ещё один бюджет, он доделает с уже сделанного" };
+  if (r.startsWith("max_iterations")) return { why: "Агент исчерпал попытки, а проверки так и не прошли.", continueUseful: false, fix: "новая сессия разберёт, почему падают проверки, и попробует другой подход" };
   if (r.startsWith("stuck")) {
     const gates = /in: ([^)]+)\)/.exec(r)?.[1];
-    return { why: `Агент два раза подряд получил одну и ту же ошибку${gates ? ` (${gateNames(gates)})` : ""} — дальше крутился бы на месте.`, continueUseful: false };
+    return { why: `Агент два раза подряд получил одну и ту же ошибку${gates ? ` (${gateNames(gates)})` : ""} — дальше крутился бы на месте.`, continueUseful: false, fix: "новая сессия разберёт ошибку заново и попробует другой подход" };
   }
   if (r.startsWith("review_blocked")) {
-    if (/ревью не состоялось/.test(r)) return { why: "Независимое ревью не удалось провести — изменения никто не проверил.", continueUseful: false };
+    if (/ревью не состоялось/.test(r)) return { why: "Независимое ревью не удалось провести — изменения никто не проверил.", continueUseful: false, fix: "запущу проверки и ревью ещё раз" };
     const findings = r.replace(/^review_blocked[^:]*:\s*/, "");
-    return { why: `Ревью нашло проблемы, которые агент не исправил: ${clip(findings, 300)}`, continueUseful: false };
+    return { why: `Ревью нашло проблемы, которые агент не исправил: ${clip(findings, 300)}`, continueUseful: false, fix: "агент исправит замечания ревью, потом ревью проверит ещё раз" };
   }
   if (r.startsWith("gate_integrity_violation")) {
-    return { why: "Агент тронул сами проверки (тесты или их настройки) — такое автоматически не принимаю, нужен твой взгляд.", continueUseful: false };
+    return { why: "Агент тронул сами проверки (тесты или их настройки) — такое автоматически не принимаю.", continueUseful: false, fix: "агент вернёт проверки как были и доделает задачу честно" };
   }
-  if (r.startsWith("agent_error")) return { why: "Агент прервался посреди работы (лимит аккаунта, бюджет хода или сбой).", continueUseful: true };
+  if (r.startsWith("agent_error")) return { why: "Агент прервался посреди работы (лимит аккаунта, бюджет хода или сбой).", continueUseful: true, fix: "агент продолжит с того же места" };
   if (r.startsWith("rebase_conflict")) {
-    return { why: "Пока задача стояла на паузе, в dev появились изменения, и совместить их с работой автоматически не вышло.", continueUseful: false };
+    return {
+      why: "Пока задача стояла на паузе, в dev появились изменения, и совместить их с работой автоматически не вышло.",
+      continueUseful: false,
+      fix: "волью свежий dev в ветку, агент сам разрулит конфликты и прогонит проверки",
+    };
   }
-  if (r.startsWith("push/MR failed")) return { why: "Работа готова, но не удалось запушить ветку или открыть MR в GitLab.", continueUseful: false };
-  if (r.startsWith("остановлено вручную")) return { why: "Работа остановлена командой /kill.", continueUseful: true };
-  if (r.startsWith("сбой харнесса")) return { why: "Внутренний сбой бота посреди работы — сделанное сохранено.", continueUseful: true };
-  return { why: "Работа остановилась по необычной причине — подробности на дашборде.", continueUseful: false };
+  if (r.startsWith("push/MR failed")) return { why: "Работа готова, но не удалось запушить ветку или открыть MR в GitLab.", continueUseful: false, fix: "повторю пуш и открытие MR" };
+  if (r.startsWith("остановлено вручную")) return { why: "Работа остановлена командой /kill.", continueUseful: true, fix: "агент продолжит с уже сделанного" };
+  if (r.startsWith("сбой харнесса")) return { why: "Внутренний сбой бота посреди работы — сделанное сохранено.", continueUseful: true, fix: "агент продолжит с уже сделанного" };
+  return { why: "Работа остановилась по необычной причине — подробности на дашборде.", continueUseful: false, fix: "новая сессия агента разберётся и доделает задачу" };
 }
 
 function lowerFirst(text: string): string {
@@ -142,8 +149,8 @@ export interface DecisionInput {
 // The "bot stopped, choose what to do" message. Short by design: what happened, what
 // is already done, what each button will do. The full diff lives on the dashboard and
 // in the MR, not in a chat message.
-export function composeDecisionText(input: DecisionInput, diff: string | null, canContinue: boolean): string {
-  const { why } = explainStop(input.reason);
+export function composeDecisionText(input: DecisionInput, diff: string | null, canAutoFix: boolean): string {
+  const { why, fix } = explainStop(input.reason);
   const lines = [headline("decision", input.issueKey)];
   if (input.title) lines.push(clip(input.title, 120));
   lines.push("", `Что случилось: ${why}`);
@@ -163,8 +170,8 @@ export function composeDecisionText(input: DecisionInput, diff: string | null, c
   lines.push(`Потрачено: ${MONEY(input.costUsd)}${input.budgetUsd ? ` из ${MONEY(input.budgetUsd)}` : ""}`);
 
   lines.push("", "Что можно сделать:");
-  if (diff === null || diffStats(diff).files.length > 0) lines.push("🚀 Открыть MR — запушу сделанное как есть, проверишь сам");
-  if (canContinue) lines.push("🔄 Доработать — агент продолжит в новой сессии с того, что уже сделано");
+  if (canAutoFix) lines.push(`🛠 Решить самому — ${fix}`);
+  if (diff === null || diffStats(diff).files.length > 0) lines.push("🚀 Открыть MR как есть — запушу сделанное, проверишь сам");
   lines.push("🗑 Выбросить — удалю работу, тикет вернётся в «Сделать»");
   return lines.join("\n");
 }
@@ -175,8 +182,8 @@ function shortPath(path: string): string {
 }
 
 export const DECISION_BUTTONS = {
-  accept: "🚀 Открыть MR",
-  continue: "🔄 Доработать",
+  autoFix: "🛠 Решить самому",
+  accept: "🚀 Открыть MR как есть",
   reject: "🗑 Выбросить",
   confirmReject: "🗑 Да, выбросить",
   keep: "↩️ Нет, оставить",

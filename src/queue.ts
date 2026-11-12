@@ -24,7 +24,8 @@ import {
   clearPendingBrief,
   type PendingHumanReview,
 } from "./bot/liveState.js";
-import { commitAll, deleteBranch, getWorktreeDiff, removeWorktree, worktreeDirFor } from "./engine/git.js";
+import { commitAll, deleteBranch, getWorktreeDiff, mergeFreshBase, removeWorktree, worktreeDirFor } from "./engine/git.js";
+import { buildAutoFixPrompt } from "./engine/fixPrompts.js";
 import { buildWorkReportDocument, workReportFilename } from "./engine/workReport.js";
 import { generateTestingNotes } from "./engine/testingNotes.js";
 import { generateCloseReport } from "./engine/closeReport.js";
@@ -828,7 +829,7 @@ export async function closeLoopAndPush(
     branchName,
     gates: repo.gates,
     maxIterations: config.maxIterations,
-    maxBudgetUsd: config.maxBudgetUsd,
+    maxBudgetUsd: config.maxBudgetUsd + (resumeFrom?.budgetExtensionUsd ?? 0),
     maxContextTokens: config.maxContextTokens,
     permissionMode: "acceptEdits",
     model: config.models.implement,
@@ -1443,7 +1444,25 @@ function clipDiff(diff: string): string {
 // ever reachable when resumeState is set, which is itself only ever set for a
 // single-repo task (see the two commented-out cross-repo call sites above) — no
 // crossRepo branching needed here the way resolveBrief has.
-export async function continueNeedsHuman(): Promise<QueueRunOutcome | null> {
+// "🛠 Решить самому": the same continuation, available for every stop that left a
+// resume state (all of them since loop.ts withFixResumeState), with a first prompt that
+// says what stopped the last attempt (engine/fixPrompts.ts), a fresh MAX_BUDGET_USD on
+// top of what was already spent, and — for a rebase conflict — dev merged in first so
+// the agent can resolve the conflict itself. A push/MR failure needs no agent; bot.ts
+// sends that one straight to resolveHumanReview(true).
+export function autoFixNeedsHuman(): Promise<QueueRunOutcome | null> {
+  return continueNeedsHuman({ autoFix: true });
+}
+
+export function canAutoFix(pending: { reason: string; resumeState?: unknown }): boolean {
+  return Boolean(pending.resumeState) || isPushFailure(pending.reason);
+}
+
+export function isPushFailure(reason: string): boolean {
+  return reason.startsWith("push/MR failed");
+}
+
+export async function continueNeedsHuman(opts: { autoFix?: boolean } = {}): Promise<QueueRunOutcome | null> {
   const pending = getLiveState().pendingHumanReview;
   if (!pending?.resumeState) return null;
   // Before anything is cleared: a continuation is a new paid session, and it used to
@@ -1471,18 +1490,22 @@ export async function continueNeedsHuman(): Promise<QueueRunOutcome | null> {
   const startedAt = Date.now();
   try {
     const resumeState = pending.resumeState;
+    const conflict = opts.autoFix && /^(?:(?:backend|frontend): )?rebase_conflict/.test(pending.reason);
+    const conflictedFiles = conflict ? (await mergeFreshBase(resumeState.worktreeDir, config.gitlab.targetBranch)).conflictedFiles : [];
     // A fresh session knows nothing — replay the diff plus whatever the stopped
     // session's own gates last said. A same-session resume (agent_error) already has
     // all of that in its history.
-    const prompt = resumeState.freshSession
-      ? buildContinuationPrompt(
-          task,
-          clipDiff(await getWorktreeDiff(resumeState.worktreeDir, config.gitlab.targetBranch)),
-          config.briefsEnabled,
-          resumeState.failedGates,
-        )
-      : buildInterruptedResumePrompt();
-    const outcome = await closeLoopAndPush(issue, repo, task, pending.branchName, { ...resumeState, prompt });
+    const freshDiff = async (): Promise<string> => clipDiff(await getWorktreeDiff(resumeState.worktreeDir, config.gitlab.targetBranch));
+    const prompt = !resumeState.freshSession
+      ? buildInterruptedResumePrompt()
+      : opts.autoFix
+        ? buildAutoFixPrompt(task, pending.reason, await freshDiff(), config.briefsEnabled, resumeState.failedGates, conflictedFiles)
+        : buildContinuationPrompt(task, await freshDiff(), config.briefsEnabled, resumeState.failedGates);
+    const outcome = await closeLoopAndPush(issue, repo, task, pending.branchName, {
+      ...resumeState,
+      prompt,
+      ...(opts.autoFix ? { iteration: 0, skipRebase: conflict, budgetExtensionUsd: resumeState.totalCostUsd } : {}),
+    });
     const jobOutcome = await handleCloseLoopOutcome(jira, issue, repo, task, pending.branchName, outcome);
     // pending.costUsd is exactly what the needs_human record that led here already put
     // into history — see costAlreadyRecordedUsd's own comment (types.ts).

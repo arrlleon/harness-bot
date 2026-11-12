@@ -58,6 +58,13 @@ export interface CloseLoopResumeState {
   // resumed fix turn goes on to break a gate — reviewChanges isn't re-run before this,
   // since the diff hasn't changed since the brief was raised.
   reviewResume?: { round: number; blocking: ReviewFinding[] };
+  // Set by the "🛠 Решить самому" path (queue.ts autoFixNeedsHuman) after it has
+  // already merged the fresh dev into the worktree itself — the resume must not then
+  // try its own rebase on top of that merge.
+  skipRebase?: boolean;
+  // Extra money on top of MAX_BUDGET_USD for this one run: a fix started after the
+  // task already spent its budget would otherwise stop again on its first check.
+  budgetExtensionUsd?: number;
   // True only for a context_budget resume (queue.ts's continueNeedsHuman) — every
   // other resumeFrom use (brief, review-fix brief) reuses `sessionId` via `--resume` on
   // purpose, because the paused turn's own reasoning is exactly what the resumed turn
