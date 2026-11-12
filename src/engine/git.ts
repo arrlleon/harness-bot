@@ -104,6 +104,12 @@ export interface RebaseOutcome {
 export async function rebaseOntoFreshBase(worktreeDir: string, targetBranch: string): Promise<RebaseOutcome> {
   const { stdout: before } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: worktreeDir });
   await execFileAsync("git", ["fetch", "origin", targetBranch], { cwd: worktreeDir });
+  // getWorktreeDiff leaves new files as intent-to-add entries in the index, and git
+  // cannot stash those: the autostash failed with "Entry '<new file>' not uptodate.
+  // Cannot merge" and the task was reported as a rebase conflict with nothing to
+  // conflict (reproduced live, XEN-381). A mixed reset drops the entries and keeps
+  // every file as it is; the new files simply ride through the rebase as untracked.
+  await execFileAsync("git", ["reset", "-q"], { cwd: worktreeDir });
   try {
     const { stdout, stderr } = await execFileAsync("git", ["rebase", "--autostash", `origin/${targetBranch}`], { cwd: worktreeDir });
     const { stdout: after } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: worktreeDir });

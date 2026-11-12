@@ -489,3 +489,35 @@ test("deleteBranch on a non-existent branch is a no-op, not an error", async () 
   await assert.doesNotReject(deleteBranch(repo, "no-such-branch"));
   await rm(repo, { recursive: true, force: true });
 });
+
+// Reproduced live (XEN-381): the review diff had registered the task's new files as
+// intent-to-add, and `rebase --autostash` then refused to stash at all.
+test("rebaseOntoFreshBase survives new files left as intent-to-add by getWorktreeDiff", async () => {
+  const { origin, local } = await makeRepoWithRemote();
+  const branch = uniqueBranch();
+  try {
+    const dir = await createWorktree(local, branch);
+    await writeFile(join(dir, "README.md"), "initial\nedited in the worktree\n");
+    await writeFile(join(dir, "brand-new.ts"), "export const x = 1;\n");
+    await getWorktreeDiff(dir, "dev");
+
+    const other = await mkdtemp(join(tmpdir(), "jira-harness-git-other-"));
+    await execFileAsync("git", ["clone", "-q", "-b", "dev", origin, other]);
+    await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: other });
+    await execFileAsync("git", ["config", "user.name", "Test"], { cwd: other });
+    await writeFile(join(other, "unrelated.txt"), "dev moved on\n");
+    await execFileAsync("git", ["add", "-A"], { cwd: other });
+    await execFileAsync("git", ["commit", "-q", "-m", "unrelated"], { cwd: other });
+    await execFileAsync("git", ["push", "-q", "origin", "dev"], { cwd: other });
+    await rm(other, { recursive: true, force: true });
+
+    const outcome = await rebaseOntoFreshBase(dir, "dev");
+    assert.equal(outcome.conflict, false, outcome.output);
+    assert.equal(await readFile(join(dir, "brand-new.ts"), "utf8"), "export const x = 1;\n");
+    assert.equal(await readFile(join(dir, "README.md"), "utf8"), "initial\nedited in the worktree\n");
+    assert.equal(await readFile(join(dir, "unrelated.txt"), "utf8"), "dev moved on\n");
+  } finally {
+    await cleanup(local, branch);
+    await rm(origin, { recursive: true, force: true });
+  }
+});
