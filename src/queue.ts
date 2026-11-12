@@ -1450,8 +1450,15 @@ function clipDiff(diff: string): string {
 // top of what was already spent, and — for a rebase conflict — dev merged in first so
 // the agent can resolve the conflict itself. A push/MR failure needs no agent; bot.ts
 // sends that one straight to resolveHumanReview(true).
-export function autoFixNeedsHuman(): Promise<QueueRunOutcome | null> {
-  return continueNeedsHuman({ autoFix: true });
+export function autoFixNeedsHuman(opts: { capUsd?: number } = {}): Promise<QueueRunOutcome | null> {
+  return continueNeedsHuman({ autoFix: true, capUsd: opts.capUsd });
+}
+
+// Budget on top of MAX_BUDGET_USD for a fix run: a full fresh allowance by default; with
+// a cap for the whole task (autopilot), no more than what keeps the total under it.
+export function fixBudgetExtension(spentUsd: number, maxBudgetUsd: number, capUsd?: number): number {
+  if (capUsd === undefined) return spentUsd;
+  return Math.max(0, Math.min(spentUsd, capUsd - maxBudgetUsd));
 }
 
 export function canAutoFix(pending: { reason: string; resumeState?: unknown }): boolean {
@@ -1462,7 +1469,7 @@ export function isPushFailure(reason: string): boolean {
   return reason.startsWith("push/MR failed");
 }
 
-export async function continueNeedsHuman(opts: { autoFix?: boolean } = {}): Promise<QueueRunOutcome | null> {
+export async function continueNeedsHuman(opts: { autoFix?: boolean; capUsd?: number } = {}): Promise<QueueRunOutcome | null> {
   const pending = getLiveState().pendingHumanReview;
   if (!pending?.resumeState) return null;
   // Before anything is cleared: a continuation is a new paid session, and it used to
@@ -1504,7 +1511,9 @@ export async function continueNeedsHuman(opts: { autoFix?: boolean } = {}): Prom
     const outcome = await closeLoopAndPush(issue, repo, task, pending.branchName, {
       ...resumeState,
       prompt,
-      ...(opts.autoFix ? { iteration: 0, skipRebase: conflict, budgetExtensionUsd: resumeState.totalCostUsd } : {}),
+      ...(opts.autoFix
+        ? { iteration: 0, skipRebase: conflict, budgetExtensionUsd: fixBudgetExtension(resumeState.totalCostUsd, config.maxBudgetUsd, opts.capUsd) }
+        : {}),
     });
     const jobOutcome = await handleCloseLoopOutcome(jira, issue, repo, task, pending.branchName, outcome);
     // pending.costUsd is exactly what the needs_human record that led here already put

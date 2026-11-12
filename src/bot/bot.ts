@@ -17,6 +17,7 @@ import { setBotRunning, getLiveState, loadPersistedPending } from "./liveState.j
 import { acquireBotLock } from "./lock.js";
 import { headline, explainStop, composeDecisionText, DECISION_BUTTONS, PROPOSAL_BUTTONS } from "./messages.js";
 import { startProgressReporter } from "./progress.js";
+import { driveToEnd } from "../autopilot.js";
 import { tmpdir } from "node:os";
 import { recoverOrphanedCheckpoints } from "../engine/checkpoint.js";
 import { startDashboardServer, dashboardUrl } from "../web/server.js";
@@ -345,6 +346,10 @@ export async function startBot(): Promise<void> {
   }
   const senderFor = (chatId: number | string): Sender => (text, keyboard) => sendSafe(chatId, text, keyboard);
   const announce: Sender = senderFor(announceChatId);
+  // Everything after an approved plan runs through the autopilot (autopilot.ts): the
+  // agent's own questions and fixable stops are handled without asking.
+  const drive = (outcome: QueueRunOutcome | null): Promise<QueueRunOutcome | null> =>
+    driveToEnd(outcome, { record: (o) => recordOutcome(state, o), notify: (text) => announce(text) });
 
   // "What is it doing now", every 5 minutes while a task runs — one message per task,
   // edited in place (see progress.ts).
@@ -750,9 +755,12 @@ export async function startBot(): Promise<void> {
     }
     await ctx.answerCallbackQuery({ text: "Беру в работу 🛠️" });
     const original = ctx.callbackQuery.message?.text ?? `${key}`;
-    await ctx.editMessageText(fitTelegram(original + "\n\n▶️ Взято в работу. Раз в 5 минут буду писать, что сейчас делаю.")).catch(() => {});
+    await ctx.editMessageText(fitTelegram(original + (config.autopilot.enabled
+            ? "\n\n▶️ Взято в работу. Доведу до MR сам: вопросы решу сам, при сбое попробую исправить. Раз в 5 минут пишу, что делаю."
+            : "\n\n▶️ Взято в работу. Раз в 5 минут буду писать, что сейчас делаю."))).catch(() => {});
 
     confirmPending()
+      .then(drive)
       .then(async (outcome) => {
         if (!outcome) return;
         recordOutcome(state, outcome);
@@ -863,6 +871,7 @@ export async function startBot(): Promise<void> {
     await ctx.editMessageText(fitTelegram(original + "\n\n🛠 Выбрано: решить самому. Агент взялся, раз в 5 минут буду писать, что делает.")).catch(() => {});
 
     autoFixNeedsHuman()
+      .then(drive)
       .then(async (outcome) => {
         if (!outcome) return;
         recordOutcome(state, outcome);
@@ -943,6 +952,7 @@ export async function startBot(): Promise<void> {
     await ctx.editMessageText(fitTelegram(original + `\n\n🔄 Выбрано: доработать. Агент продолжает ${how}, раз в 5 минут буду писать, что делает.`)).catch(() => {});
 
     continueNeedsHuman()
+      .then(drive)
       .then(async (outcome) => {
         if (!outcome) return;
         recordOutcome(state, outcome);
@@ -978,6 +988,7 @@ export async function startBot(): Promise<void> {
     await ctx.editMessageText(fitTelegram(original + `\n\n✅ Выбрано: ${chosenLabel}. Продолжаю работу.`)).catch(() => {});
 
     resolveBrief(chosenIndex)
+      .then(drive)
       .then(async (outcome) => {
         if (!outcome) return;
         recordOutcome(state, outcome);

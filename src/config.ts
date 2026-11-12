@@ -168,6 +168,14 @@ export const config = {
   // SAME implement turn's response, not a separate turn) — the toggle exists for
   // debugging/rollback, same reasoning as gateIntegrityCheckEnabled.
   briefsEnabled: (process.env.BRIEFS_ENABLED ?? "true") !== "false",
+  // After the plan is approved, take the task to an MR without asking (autopilot.ts):
+  // answer the agent's own questions with its recommended option, and retry a stop
+  // through "Решить самому" up to maxFixes times, within taskCapUsd for the whole task.
+  autopilot: {
+    enabled: (process.env.AUTOPILOT ?? "true") !== "false",
+    maxFixes: numberEnv("AUTOPILOT_MAX_FIXES", 2),
+    taskCapUsd: numberEnv("AUTOPILOT_TASK_CAP_USD", 80),
+  },
   // Same shape, same default. Purely informational (never blocks a push) — one more
   // read-only turn per successful task, same cost tier as review/memory.
   testingNotesEnabled: (process.env.TESTING_NOTES_ENABLED ?? "true") !== "false",
