@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildScopePrompt, combineVerdicts, parseNoChangesSignal, parseRepoVerdict } from "./repoScope.js";
+import { buildScopePrompt, combineVerdicts, parseNoChangesSignal, parseRepoVerdict, stripPreamble } from "./repoScope.js";
 import type { TaskSpec } from "../types.js";
 
 const task: TaskSpec = {
@@ -91,4 +91,23 @@ test("parseRepoVerdict drops a leading 'ИЗМЕНЕНИЯ: НУЖНЫ' line the
   const verdict = parseRepoVerdict(`ИЗМЕНЕНИЯ: НУЖНЫ\n\n${PLAN}`, 0.2);
   assert.equal(verdict.needsChanges, true);
   assert.equal(verdict.plan, "Добавить поле signedAt в DTO.");
+});
+
+// XEN-632, live: reasoning first, signal line last — the frontend was put in scope.
+test("parseNoChangesSignal finds the signal on a later line after the model's reasoning", () => {
+  const text = "Это чисто архитектурный фикс внутри back-ai.\n\nИЗМЕНЕНИЯ: НЕ НУЖНЫ — внутренний рефакторинг слоёв";
+  assert.equal(parseNoChangesSignal(text), "внутренний рефакторинг слоёв");
+  assert.equal(parseRepoVerdict(text, 0.1).needsChanges, false);
+});
+
+test("parseNoChangesSignal ignores a signal line inside a real plan with criteria", () => {
+  const text = `${PLAN}\nИЗМЕНЕНИЯ: НЕ НУЖНЫ — в миграциях`;
+  assert.equal(parseNoChangesSignal(text), null);
+});
+
+test("stripPreamble drops reasoning written before ПЛАН:, and the parsed plan starts at the plan", () => {
+  const text = `Подтверждено по ADR-0031.\n\nТеперь всё подтверждено кодом.\n\n${PLAN}`;
+  assert.match(stripPreamble(text), /^ПЛАН:/);
+  assert.equal(parseRepoVerdict(text, 0.1).plan, "Добавить поле signedAt в DTO.");
+  assert.equal(stripPreamble("без метки"), "без метки");
 });

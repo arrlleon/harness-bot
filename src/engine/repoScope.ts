@@ -40,14 +40,27 @@ export interface ScopeAnalysis {
 const REPO_LABEL: Record<RepoKind, string> = { backend: "бэкенд", frontend: "фронтенд" };
 const OTHER: Record<RepoKind, RepoKind> = { backend: "frontend", frontend: "backend" };
 
-// Anchored to the start of the response: the phrase turning up inside an ordinary plan
-// ("изменения в схеме не нужны") must never be read as "this repo is out of scope".
-const NO_CHANGES_SIGNAL = /^\s*изменения\s*:\s*не\s+нужны(?![а-яё])[\s.:—–-]*([^\n]*)/i;
+// Must start a line: the phrase inside a sentence of an ordinary plan ("изменения в
+// схеме не нужны") must never be read as "this repo is out of scope". Any line, not
+// just the first — seen live (XEN-632): the model wrote a paragraph of reasoning and
+// only then the signal line, and the whole answer was taken for a plan, putting a
+// backend-only fix in scope for the frontend too.
+const NO_CHANGES_SIGNAL = /^[ \t]*изменения\s*:\s*не\s+нужны(?![а-яё])[ \t.:—–-]*([^\n]*)/im;
+const CRITERIA_SECTION = /^[ \t]*критерии\s+при[её]мки\s*:?/im;
 
+// A real plan (it has a criteria section) wins over a stray signal line inside it.
 export function parseNoChangesSignal(text: string): string | null {
+  if (CRITERIA_SECTION.test(text)) return null;
   const match = NO_CHANGES_SIGNAL.exec(text);
   if (!match) return null;
   return match[1].trim() || "причина не указана";
+}
+
+// Seen live (XEN-632): reasoning notes written before "ПЛАН:" ended up at the top of
+// the plan the human approves. Everything before the last "ПЛАН:" line is dropped.
+export function stripPreamble(text: string): string {
+  const labels = [...text.matchAll(/^[ \t]*план\s*:/gim)];
+  return labels.length ? text.slice(labels[labels.length - 1].index) : text;
 }
 
 export function buildScopePrompt(task: TaskSpec, thisRepo: RepoKind, otherRepoPath: string, memoryContext: string): string {
@@ -92,7 +105,7 @@ export function parseRepoVerdict(text: string, costUsd: number): RepoVerdict {
   if (reason !== null) return { needsChanges: false, plan: "", acceptanceCriteria: [], reason, costUsd };
   // Seen live: the model mirrors the opt-out line with an "ИЗМЕНЕНИЯ: НУЖНЫ" of its own
   // before the plan. Not asked for, and it would otherwise open the plan shown to the human.
-  const { plan, acceptanceCriteria } = parseProposalResponse(text.replace(/^\s*изменения\s*:\s*нужны[^\n]*\n+/i, ""));
+  const { plan, acceptanceCriteria } = parseProposalResponse(stripPreamble(text.replace(/^\s*изменения\s*:\s*нужны[^\n]*\n+/i, "")));
   return { needsChanges: true, plan, acceptanceCriteria, costUsd };
 }
 
