@@ -230,7 +230,8 @@ async function loadTickets() {
       return;
     }
     container.innerHTML = tickets.map(function (t) {
-      const routable = t.repo === "backend" || t.repo === "frontend" || t.repo === "ambiguous";
+      // Untagged tickets are startable too: the repos are decided from the code at analysis.
+      const routable = true;
       const tagClass = routable ? "" : " route-" + t.repo;
       return '<div class="ticket-row">' +
         '<div class="ticket-main">' +

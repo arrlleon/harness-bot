@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { splitCrossRepoCriteria, whatsBusy, buildFailureReason } from "./queue.js";
+import { splitCrossRepoCriteria, whatsBusy, buildFailureReason, withSkippedRepos, approvedScope } from "./queue.js";
 import { setAnalyzing, startJob, finishJob } from "./bot/liveState.js";
 import type { CloseLoopResult, ClaudeTurnResult } from "./types.js";
 
@@ -171,4 +171,20 @@ test("buildFailureReason falls back to the bare word when agent_error has nothin
 test("buildFailureReason falls back to the bare stopReason for anything with nothing extra to add", () => {
   assert.equal(buildFailureReason(closeLoopResult({ stopReason: "max_iterations" })), "max_iterations");
   assert.equal(buildFailureReason(closeLoopResult({ stopReason: "max_budget" })), "max_budget");
+});
+
+test("withSkippedRepos tells the approver which repo is left untouched and why", () => {
+  assert.equal(withSkippedRepos("Поправить сервис.", []), "Поправить сервис.");
+  const plan = withSkippedRepos("Поправить сервис.", [{ repo: "frontend", reason: "карточка уже показывает поле" }]);
+  assert.match(plan, /^Поправить сервис\.\n\nРепозиторий фронтенд не трогаю: карточка уже показывает поле$/);
+});
+
+// Dispatch routes by the scope that was approved; only an unrecognised value (a
+// proposal persisted by an older build) falls back to the title's tags.
+test("approvedScope passes through the three known scopes and nothing else", () => {
+  assert.equal(approvedScope("backend"), "backend");
+  assert.equal(approvedScope("frontend"), "frontend");
+  assert.equal(approvedScope("cross"), "cross");
+  assert.equal(approvedScope("ambiguous"), undefined);
+  assert.equal(approvedScope(""), undefined);
 });

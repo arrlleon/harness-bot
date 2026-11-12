@@ -7,6 +7,7 @@ import { buildContinuationPrompt, buildInterruptedResumePrompt } from "./engine/
 import { runClaudeTurn } from "./engine/claudeEngine.js";
 import { parseProposalResponse, parseWrongRepoSignal } from "./engine/proposal.js";
 import { readMemoryFiles, buildMemoryContextBlock } from "./engine/memory.js";
+import { analyzeRepoScope, type RepoScope } from "./engine/repoScope.js";
 import { createMergeRequest, deleteRemoteBranch, pushBranch } from "./gitlab.js";
 import {
   startJob,
@@ -282,6 +283,46 @@ export function splitCrossRepoCriteria(criteria: string[]): { backend: string[];
   return { backend, frontend };
 }
 
+const SCOPE_REPO_RU: Record<RepoKind, string> = { backend: "бэкенд", frontend: "фронтенд" };
+
+// The plan the human approves says which repo was left out and why — "the bot only did
+// the frontend" should be something they agreed to, not something they find out later.
+export function withSkippedRepos(plan: string, skipped: Array<{ repo: RepoKind; reason: string }>): string {
+  if (skipped.length === 0) return plan;
+  const lines = skipped.map((s) => `Репозиторий ${SCOPE_REPO_RU[s.repo]} не трогаю: ${s.reason}`);
+  return [plan, "", ...lines].join("\n");
+}
+
+async function proposeByCodeScope(
+  jira: JiraClient,
+  issue: JiraIssue,
+  onAnalyzing?: (issueKey: string) => void | Promise<void>,
+): Promise<ProposeOutcome> {
+  await onAnalyzing?.(issue.key);
+
+  const analysis = await analyzeRepoScope(toTaskSpec(issue));
+  if (!analysis.scope) {
+    const why = analysis.skippedRepos.map((s) => `${SCOPE_REPO_RU[s.repo]}: ${s.reason}`).join("; ");
+    const reason = `анализ кода не нашёл, что менять ни в одном репозитории (${why})`;
+    declinedKeys.add(issue.key);
+    await safeComment(jira, issue.key, `jira-harness: ${reason}. Пропускаю — тикет оставлен как есть.`);
+    return { kind: "skipped", issueKey: issue.key, reason };
+  }
+
+  const proposal = {
+    issueKey: issue.key,
+    title: issue.summary,
+    repo: analysis.scope,
+    descriptionShort: issue.description.slice(0, 300),
+    plan: withSkippedRepos(analysis.plan, analysis.skippedRepos),
+    acceptanceCriteria: analysis.acceptanceCriteria,
+    costUsd: analysis.costUsd,
+    costEstimate: estimateCost(loadState(), analysis.scope),
+  };
+  setPendingApproval({ ...proposal, description: issue.description });
+  return { kind: "proposed", proposal };
+}
+
 // Shared by proposeNext (auto-picked, whatever's top of the JQL order) and
 // proposeIssueByKey (manually picked from /start's ticket menu).
 async function proposeIssue(
@@ -289,6 +330,13 @@ async function proposeIssue(
   issue: JiraIssue,
   onAnalyzing?: (issueKey: string) => void | Promise<void>,
 ): Promise<ProposeOutcome> {
+  // Both repos configured: the scope comes from the code (engine/repoScope.ts), and
+  // the title's tags are not consulted at all. The tag-based routing below is only what
+  // is left for a single-repo installation, where there is nothing to choose between.
+  if (config.repos.backend.path && config.repos.frontend.path) {
+    return proposeByCodeScope(jira, issue, onAnalyzing);
+  }
+
   const detection = detectRepo(issue);
   if (detection.kind === "unknown") {
     const reason = "no [backend]/[frontend]/[web] prefix in title or description";
@@ -494,7 +542,7 @@ export async function confirmPending(): Promise<QueueRunOutcome | null> {
   const issue: JiraIssue = { key: pending.issueKey, summary: pending.title, description: pending.description };
   let outcome: QueueRunOutcome;
   try {
-    outcome = await dispatchIssue(jira, issue, pending.acceptanceCriteria);
+    outcome = await dispatchIssue(jira, issue, pending.acceptanceCriteria, approvedScope(pending.repo));
   } catch (err) {
     // Threw before any work existed to hand over (escalateFailure covers the rest).
     // The approved proposal — and the analysis already paid for — goes back as it was,
@@ -559,7 +607,18 @@ function checkDailyCaps(opts: { budgetOnly?: boolean } = {}): { kind: "paused"; 
 // confirmPending's own pending.acceptanceCriteria here — frozen at propose time,
 // nothing after this regenerates or edits it, the close loop only ever reads it for
 // context.
-async function dispatchIssue(jira: JiraClient, issue: JiraIssue, acceptanceCriteria: string[]): Promise<QueueRunOutcome> {
+// The scope a human approved, as dispatch's routing input. Anything else (a proposal
+// persisted by an older build, say) falls back to the title's tags.
+export function approvedScope(repo: string): RepoScope | undefined {
+  return repo === "backend" || repo === "frontend" || repo === "cross" ? repo : undefined;
+}
+
+async function dispatchIssue(
+  jira: JiraClient,
+  issue: JiraIssue,
+  acceptanceCriteria: string[],
+  scope?: RepoScope,
+): Promise<QueueRunOutcome> {
   // Final gate right before real work starts, not just currentJob — a pendingBrief/
   // pendingHumanReview with no currentJob behind it (the close loop already returned,
   // finishJob() already ran) would otherwise let a second task start while the first
@@ -570,7 +629,9 @@ async function dispatchIssue(jira: JiraClient, issue: JiraIssue, acceptanceCrite
     return { kind: "busy", issueKey: issue.key };
   }
 
-  const detection = detectRepo(issue);
+  // What was approved is what runs: the proposal's own scope decides the repos, so a
+  // tag in the title can't route the work somewhere the analysis didn't.
+  const detection: RepoDetection = scope ? { kind: scope === "cross" ? "ambiguous" : scope } : detectRepo(issue);
   if (detection.kind === "unknown") {
     const reason = "no [backend]/[frontend]/[web] prefix in title or description";
     await safeComment(jira, 

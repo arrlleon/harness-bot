@@ -36,6 +36,9 @@ interface RunClaudeTurnOptions {
   // about stopping paid task work; a chat reply must neither be killed by it nor, as it
   // used to, knock the real task's process out of /kill's reach.
   killable?: boolean;
+  // Extra directories the turn may read besides cwd — the scope analysis (repoScope.ts)
+  // looks at one repo while consulting the other.
+  addDirs?: string[];
 }
 
 // /kill's entry point — see processRegistry.ts for what it reaches and why.
@@ -121,6 +124,7 @@ export async function runClaudeTurn(opts: RunClaudeTurnOptions): Promise<ClaudeT
   if (opts.resumeSessionId) args.push("--resume", opts.resumeSessionId);
   if (opts.maxBudgetUsd) args.push("--max-budget-usd", String(opts.maxBudgetUsd));
   if (opts.model) args.push("--model", opts.model);
+  for (const dir of opts.addDirs ?? []) args.push("--add-dir", dir);
   // `--disallowedTools` is variadic; without `--` to end option parsing, commander
   // can swallow the prompt itself into that list instead of treating it as the
   // positional argument (reproduced live — the run then fails with "Input must be

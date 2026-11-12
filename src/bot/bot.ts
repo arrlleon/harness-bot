@@ -594,10 +594,10 @@ export async function startBot(): Promise<void> {
       const { issue, detection } = candidate;
       const repoLine =
         detection.kind === "backend" || detection.kind === "frontend"
-          ? `репозиторий: ${REPO_RU[detection.kind]}`
+          ? `тег: ${REPO_RU[detection.kind]} (подсказка; репозитории определю по коду при анализе)`
           : detection.kind === "ambiguous"
-            ? `репозиторий: ${REPO_RU.cross} — сначала бэкенд, потом фронтенд с его контекстом`
-            : "репозиторий: не определён (нет префикса) — будет пропущен";
+            ? `тег: ${REPO_RU.cross} (подсказка; репозитории определю по коду при анализе)`
+            : "репозиторий: без тега — определю по коду при анализе";
       await ctx.reply(
         [`${issue.key}: ${issue.summary}`, repoLine, "", issue.description.slice(0, 1000)].join("\n"),
       );
