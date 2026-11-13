@@ -59,6 +59,11 @@ function buildGates(prefix: "BACKEND" | "FRONTEND", defaultTestCommand: string):
   });
   const build = process.env[`${prefix}_GATE_BUILD`];
   if (build) gates.push({ name: "build", command: build });
+  // A diff-only check that a schema change ships with a migration (scripts/schema-
+  // migration-check.mjs). Strict for the same reason as a diff-scoped test: before the
+  // first edit there is nothing to compare, and "no worse than baseline" has no meaning.
+  const migrations = process.env[`${prefix}_GATE_MIGRATIONS`];
+  if (migrations) gates.push({ name: "migrations", command: migrations, strict: true });
   return gates;
 }
 

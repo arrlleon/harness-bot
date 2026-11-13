@@ -103,6 +103,7 @@ const GATE_RU: Record<string, string> = {
   test: "тесты",
   build: "сборка",
   acceptance: "приёмочный тест",
+  migrations: "миграции базы",
 };
 
 function gateNames(list: string): string {
