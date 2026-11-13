@@ -77,6 +77,8 @@ export function startDashboardServer(
           if (outcome.kind === "proposed") onProposal?.(outcome.proposal);
           else if (outcome.kind === "skipped") onNotice?.(`⏭️ ${issueKey}: пропущен (${outcome.reason})`);
           else if (outcome.kind === "paused") onNotice?.(`⏸ ${issueKey} не запущен: ${outcome.reason}`);
+          else if (outcome.kind === "nothing_to_do")
+            onNotice?.(`⚠️ ${issueKey}: анализ считает, что менять нечего (${outcome.reasons.map((r) => `${r.repo}: ${r.reason}`).join("; ").slice(0, 600)}). Напиши мне в чат, если делать всё равно.`);
           else onNotice?.(`${issueKey} не запущен с дашборда: бот занят другой задачей или ждёт решения.`);
         })
         .catch((err: Error) => {

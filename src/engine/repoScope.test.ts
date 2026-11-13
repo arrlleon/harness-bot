@@ -126,3 +126,12 @@ test("combineVerdicts carries the summary: one repo as is, both repos labelled",
   const none = parseRepoVerdict("ИЗМЕНЕНИЯ: НЕ НУЖНЫ — нечего", 0.1);
   assert.equal(combineVerdicts(back, none).summary, "добавлю поле");
 });
+
+// XEN-541: after "nothing to change", the human says "do it anyway".
+test("buildScopePrompt, forced: no opt-out on offer, and the human's note is in the prompt", () => {
+  const prompt = buildScopePrompt(task, "backend", "/repos/front-ai", "", { forced: true, note: "запрети удаление для add_only даже автору" });
+  assert.match(prompt, /Руководитель уже решил, что в backend изменения НУЖНЫ/);
+  assert.doesNotMatch(prompt, /ответь РОВНО одной строкой/);
+  assert.match(prompt, /УКАЗАНИЕ РУКОВОДИТЕЛЯ[^\n]*\nзапрети удаление для add_only даже автору/);
+  assert.match(buildScopePrompt(task, "backend", "/x", ""), /ответь РОВНО одной строкой/);
+});

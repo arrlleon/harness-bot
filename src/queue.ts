@@ -7,7 +7,7 @@ import { buildContinuationPrompt, buildInterruptedResumePrompt } from "./engine/
 import { runClaudeTurn } from "./engine/claudeEngine.js";
 import { parseProposalResponse, parseWrongRepoSignal } from "./engine/proposal.js";
 import { readMemoryFiles, buildMemoryContextBlock } from "./engine/memory.js";
-import { analyzeRepoScope, type RepoScope } from "./engine/repoScope.js";
+import { analyzeRepoScope, type RepoScope, type ScopeOptions } from "./engine/repoScope.js";
 import { createMergeRequest, deleteRemoteBranch, pushBranch } from "./gitlab.js";
 import {
   startJob,
@@ -169,6 +169,9 @@ export type ProposeOutcome =
   // недолго" turns that into "ok, I'll wait" instead.
   | { kind: "busy"; busyWith?: string }
   | { kind: "skipped"; issueKey: string; reason: string }
+  // The analysis found nothing to change in either repo. A human decides what that
+  // means (see proposeByCodeScope) — it is not a skip.
+  | { kind: "nothing_to_do"; issueKey: string; title: string; reasons: Array<{ repo: RepoKind; reason: string }>; costUsd: number }
   | { kind: "proposed"; proposal: Proposal };
 
 // Declined tickets are skipped for the rest of this process's life so a
@@ -296,20 +299,30 @@ export function withSkippedRepos(plan: string, skipped: Array<{ repo: RepoKind; 
   return [plan, "", ...lines].join("\n");
 }
 
+// What the human added on top of the ticket travels with the task from here on: the
+// implement, review and report turns all read TaskSpec.description.
+export function withHumanNote(description: string, note?: string): string {
+  return note?.trim() ? `${description}\n\nУказание руководителя (выполнить обязательно, важнее формулировок тикета): ${note.trim()}` : description;
+}
+
 async function proposeByCodeScope(
   jira: JiraClient,
   issue: JiraIssue,
   onAnalyzing?: (issueKey: string) => void | Promise<void>,
+  opts: ScopeOptions = {},
 ): Promise<ProposeOutcome> {
   await onAnalyzing?.(issue.key);
 
-  const analysis = await analyzeRepoScope(toTaskSpec(issue));
+  const analysis = await analyzeRepoScope(toTaskSpec(issue), opts);
   if (!analysis.scope) {
+    // Not a silent skip: "nothing to change" is the analysis's opinion about a ticket a
+    // human filed as a bug. Reproduced live (XEN-541): the backend turn said "already
+    // enforced", the frontend turn said "this is backend hardening", and the ticket was
+    // dropped with a wall of text. The human decides — do it anyway, or skip.
     const why = analysis.skippedRepos.map((s) => `${SCOPE_REPO_RU[s.repo]}: ${s.reason}`).join("; ");
-    const reason = `анализ кода не нашёл, что менять ни в одном репозитории (${why})`;
-    declinedKeys.add(issue.key);
-    await safeComment(jira, issue.key, `jira-harness: ${reason}. Пропускаю — тикет оставлен как есть.`);
-    return { kind: "skipped", issueKey: issue.key, reason };
+    declinedKeys.add(issue.key); // auto-poll must not pick it again; an explicit pick still can
+    await safeComment(jira, issue.key, `jira-harness: анализ кода не нашёл, что менять ни в одном репозитории (${why}). Жду решения человека — делать всё равно или пропустить.`);
+    return { kind: "nothing_to_do", issueKey: issue.key, title: issue.summary, reasons: analysis.skippedRepos, costUsd: analysis.costUsd };
   }
 
   const proposal = {
@@ -323,7 +336,7 @@ async function proposeByCodeScope(
     costUsd: analysis.costUsd,
     costEstimate: estimateCost(loadState(), analysis.scope),
   };
-  setPendingApproval({ ...proposal, description: issue.description });
+  setPendingApproval({ ...proposal, description: withHumanNote(issue.description, opts.note) });
   return { kind: "proposed", proposal };
 }
 
@@ -333,12 +346,13 @@ async function proposeIssue(
   jira: JiraClient,
   issue: JiraIssue,
   onAnalyzing?: (issueKey: string) => void | Promise<void>,
+  opts: ScopeOptions = {},
 ): Promise<ProposeOutcome> {
   // Both repos configured: the scope comes from the code (engine/repoScope.ts), and
   // the title's tags are not consulted at all. The tag-based routing below is only what
   // is left for a single-repo installation, where there is nothing to choose between.
   if (config.repos.backend.path && config.repos.frontend.path) {
-    return proposeByCodeScope(jira, issue, onAnalyzing);
+    return proposeByCodeScope(jira, issue, onAnalyzing, opts);
   }
 
   const detection = detectRepo(issue);
@@ -519,6 +533,7 @@ export async function proposeNext(onAnalyzing?: (issueKey: string) => void | Pro
 export async function proposeIssueByKey(
   issueKey: string,
   onAnalyzing?: (issueKey: string) => void | Promise<void>,
+  opts: ScopeOptions = {},
 ): Promise<ProposeOutcome> {
   const paused = checkDailyCaps();
   if (paused) return paused;
@@ -529,7 +544,7 @@ export async function proposeIssueByKey(
   try {
     const jira = new JiraClient(config.jira.baseUrl, config.jira.token);
     const issue = await jira.getIssue(issueKey);
-    return await proposeIssue(jira, issue, onAnalyzing);
+    return await proposeIssue(jira, issue, onAnalyzing, opts);
   } finally {
     setAnalyzing(null);
   }

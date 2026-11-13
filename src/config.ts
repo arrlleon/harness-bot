@@ -127,6 +127,10 @@ export const config = {
   models: {
     chat: process.env.CHAT_MODEL ?? "claude-haiku-4-5-20251001",
     propose: process.env.PROPOSE_MODEL ?? "claude-sonnet-5",
+    // The free-text chat (bot/assistant.ts): answers questions about what happened and
+    // about the code (read-only access to both repos) and picks bot commands. Needs
+    // real reading comprehension, unlike the old keyword classifier — propose's tier.
+    assistant: process.env.ASSISTANT_MODEL ?? process.env.PROPOSE_MODEL ?? "claude-sonnet-5",
     implement: process.env.IMPLEMENT_MODEL ?? "claude-opus-5",
     // Writing a good acceptance test needs real codebase understanding (test-module
     // setup, mocking conventions) but is a single, bounded turn, not an open-ended
@@ -176,6 +180,8 @@ export const config = {
   // After the plan is approved, take the task to an MR without asking (autopilot.ts):
   // answer the agent's own questions with its recommended option, and retry a stop
   // through "Решить самому" up to maxFixes times, within taskCapUsd for the whole task.
+  // Ceiling for one chat answer; a question that needs a look at the code costs cents.
+  assistantMaxBudgetUsd: numberEnv("ASSISTANT_MAX_BUDGET_USD", 1.5),
   autopilot: {
     enabled: (process.env.AUTOPILOT ?? "true") !== "false",
     maxFixes: numberEnv("AUTOPILOT_MAX_FIXES", 2),

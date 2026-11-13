@@ -67,12 +67,39 @@ export function stripPreamble(text: string): string {
   return labels.length ? text.slice(labels[labels.length - 1].index) : text;
 }
 
-export function buildScopePrompt(task: TaskSpec, thisRepo: RepoKind, otherRepoPath: string, memoryContext: string): string {
+export interface ScopeOptions {
+  // The human already decided this repo needs changes (the "🛠 Сделать в …" button after
+  // an analysis that found nothing, or a chat instruction): only this repo is analysed,
+  // and the "nothing to change" answer is not on offer.
+  forceRepo?: RepoKind;
+  // The human's own words on what to do — outranks the model's reading of the ticket.
+  note?: string;
+}
+
+export function buildScopePrompt(
+  task: TaskSpec,
+  thisRepo: RepoKind,
+  otherRepoPath: string,
+  memoryContext: string,
+  opts: { forced?: boolean; note?: string } = {},
+): string {
   const other = OTHER[thisRepo];
+  const optOut = opts.forced
+    ? [
+        `Руководитель уже решил, что в ${thisRepo} изменения НУЖНЫ — предыдущий анализ ответил «менять`,
+        "нечего», и это решение его не устроило. Ответ «ИЗМЕНЕНИЯ: НЕ НУЖНЫ» не принимается. Пройди по",
+        "КАЖДОМУ действию из тикета и найди по коду, где оно на самом деле не закрыто (какой эндпоинт,",
+        "метод или экран его пропускает и при каком условии), и спланируй, как это закрыть.",
+      ]
+    : [
+        `Если в ${thisRepo} менять нечего — ответь РОВНО одной строкой, без ПЛАН/КРИТЕРИИ:`,
+        "ИЗМЕНЕНИЯ: НЕ НУЖНЫ — <одно предложение: что именно здесь уже есть или почему задача этого репозитория не касается>",
+      ];
   return [
     `Задача ${task.id}: ${task.title}`,
     "",
     task.description,
+    opts.note ? `\nУКАЗАНИЕ РУКОВОДИТЕЛЯ (важнее твоего прочтения тикета, выполнить обязательно):\n${opts.note}\n` : "",
     memoryContext ? `\n${memoryContext}\n` : "",
     "Не редактируй и не создавай файлы — только изучи код (Read/Grep/Glob).",
     "",
@@ -86,8 +113,7 @@ export function buildScopePrompt(task: TaskSpec, thisRepo: RepoKind, otherRepoPa
     "ли уже нужный эндпоинт, поле, тип, параметр, вызов — и совпадает ли контракт с тем,",
     "что ожидает вторая сторона.",
     "",
-    `Если в ${thisRepo} менять нечего — ответь РОВНО одной строкой, без ПЛАН/КРИТЕРИИ:`,
-    "ИЗМЕНЕНИЯ: НЕ НУЖНЫ — <одно предложение: что именно здесь уже есть или почему задача этого репозитория не касается>",
+    ...optOut,
     "",
     `Если менять нужно — опиши только часть ${thisRepo}; вторую половину отдельно`,
     "проанализируют и сделают по второму репозиторию. Ответь строго в этом формате, на русском:",
@@ -154,14 +180,14 @@ export function combineVerdicts(backend: RepoVerdict, frontend: RepoVerdict): Sc
   };
 }
 
-async function analyzeRepo(task: TaskSpec, repo: RepoKind): Promise<RepoVerdict> {
+async function analyzeRepo(task: TaskSpec, repo: RepoKind, opts: { forced?: boolean; note?: string } = {}): Promise<RepoVerdict> {
   const repoPath = config.repos[repo].path;
   const otherPath = config.repos[OTHER[repo]].path;
   const memoryContext = buildMemoryContextBlock(await readMemoryFiles(repoPath, "pm"), "pm");
   const turn = await runClaudeTurn({
     cwd: repoPath,
     addDirs: [otherPath],
-    prompt: buildScopePrompt(task, repo, otherPath, memoryContext),
+    prompt: buildScopePrompt(task, repo, otherPath, memoryContext, opts),
     permissionMode: "acceptEdits",
     disallowedToolsOverride: "Bash,Edit,Write,MultiEdit",
     model: config.models.propose,
@@ -175,7 +201,22 @@ async function analyzeRepo(task: TaskSpec, repo: RepoKind): Promise<RepoVerdict>
   return parseRepoVerdict(turn.resultText, turn.totalCostUsd);
 }
 
-export async function analyzeRepoScope(task: TaskSpec): Promise<ScopeAnalysis> {
-  const [backend, frontend] = await Promise.all([analyzeRepo(task, "backend"), analyzeRepo(task, "frontend")]);
+export async function analyzeRepoScope(task: TaskSpec, opts: ScopeOptions = {}): Promise<ScopeAnalysis> {
+  if (opts.forceRepo) {
+    const forced = await analyzeRepo(task, opts.forceRepo, { forced: true, note: opts.note });
+    const left: RepoVerdict = {
+      needsChanges: false,
+      plan: "",
+      summary: "",
+      acceptanceCriteria: [],
+      reason: `по твоему решению задача делается только в ${opts.forceRepo}`,
+      costUsd: 0,
+    };
+    return opts.forceRepo === "backend" ? combineVerdicts(forced, left) : combineVerdicts(left, forced);
+  }
+  const [backend, frontend] = await Promise.all([
+    analyzeRepo(task, "backend", { note: opts.note }),
+    analyzeRepo(task, "frontend", { note: opts.note }),
+  ]);
   return combineVerdicts(backend, frontend);
 }

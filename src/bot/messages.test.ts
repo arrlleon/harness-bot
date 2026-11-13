@@ -84,3 +84,21 @@ test("explainStop says what 'Решить самому' will do for every kind o
   assert.match(explainStop("max_budget").fix, /ещё один бюджет/);
   assert.match(explainStop("неизвестно что").fix, /новая сессия/);
 });
+
+test("composeNothingToDoText is a short decision message, not a wall of text", async () => {
+  const { composeNothingToDoText } = await import("./messages.js");
+  const text = composeNothingToDoText({
+    issueKey: "XEN-541",
+    title: "[backend] Наличие полного доступа у пользователей с ролью «Только добавление»",
+    reasons: [
+      { repo: "backend", reason: "право уже проверяется ".repeat(60) },
+      { repo: "frontend", reason: "кнопки скрыты" },
+    ],
+    costUsd: 0.74,
+  });
+  assert.match(text, /^⚠️ НУЖНО ТВОЁ РЕШЕНИЕ · XEN-541/);
+  assert.match(text, /• Бэкенд: право уже проверяется/);
+  assert.match(text, /• Фронтенд: кнопки скрыты/);
+  assert.match(text, /Анализ стоил \$0\.74/);
+  assert.ok(text.length < 1200, `got ${text.length}`);
+});

@@ -235,3 +235,29 @@ export const PHASE_RU: Record<string, string> = {
   opening_mr: "открываю MR",
   commenting: "пишу комментарий в Jira",
 };
+
+export const NOTHING_BUTTONS = {
+  backend: "🛠 Сделать в бэкенде",
+  frontend: "🛠 Сделать во фронтенде",
+  skip: "✖️ Пропустить",
+} as const;
+
+const REPO_NAME: Record<string, string> = { backend: "Бэкенд", frontend: "Фронтенд" };
+
+// The analysis found nothing to change. Short, and a decision — not a silent skip.
+export function composeNothingToDoText(input: { issueKey: string; title: string; reasons: Array<{ repo: string; reason: string }>; costUsd: number }): string {
+  return [
+    headline("decision", input.issueKey),
+    clip(input.title, 120),
+    "",
+    "Анализ считает, что менять нечего:",
+    ...input.reasons.map((r) => `• ${REPO_NAME[r.repo] ?? r.repo}: ${clip(r.reason, 260)}`),
+    "",
+    `Анализ стоил ${MONEY(input.costUsd)}. Задачу пока не трогаю.`,
+    "",
+    "Что можно сделать:",
+    "🛠 Сделать всё равно — анализ пройдёт ещё раз с установкой «изменения нужны» и пришлёт план",
+    "✖️ Пропустить — оставлю тикет как есть",
+    "Или напиши мне словами, что именно нужно сделать — передам агенту вместе с тикетом.",
+  ].join("\n");
+}

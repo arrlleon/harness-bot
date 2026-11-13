@@ -15,10 +15,12 @@ import {
 } from "./state.js";
 import { setBotRunning, getLiveState, loadPersistedPending } from "./liveState.js";
 import { acquireBotLock } from "./lock.js";
-import { headline, explainStop, composeDecisionText, DECISION_BUTTONS, PROPOSAL_BUTTONS } from "./messages.js";
+import { headline, explainStop, composeDecisionText, composeNothingToDoText, CATEGORY, DECISION_BUTTONS, NOTHING_BUTTONS, PROPOSAL_BUTTONS } from "./messages.js";
+import { ChatLog, askAssistant, ticketKeysIn } from "./assistant.js";
+import { JiraClient } from "../jira/client.js";
+import type { ScopeOptions } from "../engine/repoScope.js";
 import { startProgressReporter } from "./progress.js";
 import { driveToEnd } from "../autopilot.js";
-import { tmpdir } from "node:os";
 import { recoverOrphanedCheckpoints } from "../engine/checkpoint.js";
 import { startDashboardServer, dashboardUrl } from "../web/server.js";
 import {
@@ -39,7 +41,7 @@ import {
   canAutoFix,
   isPushFailure,
 } from "../queue.js";
-import { killCurrentTurn, runClaudeTurn } from "../engine/claudeEngine.js";
+import { killCurrentTurn } from "../engine/claudeEngine.js";
 import type { QueueRunOutcome, Brief } from "../types.js";
 
 const REPO_RU: Record<string, string> = { backend: "бэкенд", frontend: "фронтенд", cross: "бэкенд и фронтенд (сначала бэкенд, потом фронтенд)" };
@@ -54,7 +56,7 @@ function statusTag(status: string | undefined): string {
 // bare command dispatcher. The user explicitly wants this bot to feel like talking to
 // someone who's actually handling the tickets, not reading machine log lines; the
 // underlying data (cost, plans, diffs) is never invented or reworded, only the framing
-// around it is. See classifyMessage below for the free-text half of this.
+// around it is. See assistant.ts for the free-text half of this.
 const HELP_TEXT = [
   "Я — твой зам. CEO по тикетам из Jira: слежу за очередью, читаю задачу и предлагаю решение, а как только одобришь — довожу до MR и держу в курсе на каждом шаге.",
   "",
@@ -72,7 +74,7 @@ const HELP_TEXT = [
   "/dashboard — ссылка на живой локальный дашборд",
   "/help — это сообщение",
   "",
-  "Можешь просто написать мне, без команды — отвечу или сделаю то, что просишь, если это похоже на одну из команд выше.",
+  "Можно писать и без команд, обычными словами: отвечу на вопрос (о том, что происходит с задачами, и о коде — умею в него заглянуть) или сделаю то, что просишь — например «возьми XEN-541 в бэкенде, запрети удаление для роли только добавление», «бери в работу», «что сейчас делаешь».",
 ].join("\n");
 
 function describeOutcome(outcome: QueueRunOutcome | { kind: "error"; message: string }): string | null {
@@ -311,6 +313,18 @@ export async function startBot(): Promise<void> {
 
   acquireBotLock();
   const bot = new Bot(config.telegram.botToken);
+  // What was said in the chat, for the free-text assistant (assistant.ts): every text
+  // the bot sends or edits in is recorded here, whichever code path sent it. The
+  // 5-minute progress edits and the "thinking" placeholder are noise and stay out.
+  const chatLog = new ChatLog();
+  bot.api.config.use((prev, method, payload, signal) => {
+    if (method === "sendMessage" || method === "editMessageText") {
+      const body = payload as { text?: string; parse_mode?: string };
+      const text = body.parse_mode === "MarkdownV2" ? plainFromMarkdownV2(body.text ?? "") : (body.text ?? "");
+      if (text && !text.startsWith(CATEGORY.working) && !text.startsWith("💬")) chatLog.add("bot", text);
+    }
+    return prev(method, payload, signal);
+  });
   const state: BotState = loadState();
   // A crash or hard kill can leave `running: true` on disk with nothing actually
   // polling; on a fresh process start no loop can possibly be alive yet, so the
@@ -415,6 +429,11 @@ export async function startBot(): Promise<void> {
           schedulePoll(config.telegram.idlePollSeconds);
           break;
         case "skipped":
+          schedulePoll(config.telegram.activePollSeconds);
+          break;
+        case "nothing_to_do":
+          recordTask(state, { issueKey: outcome.issueKey, outcome: "skipped", detail: "анализ: менять нечего", costUsd: outcome.costUsd, timestamp: new Date().toISOString() });
+          await announce(composeNothingToDoText(outcome), nothingToDoKeyboard(outcome.issueKey));
           schedulePoll(config.telegram.activePollSeconds);
           break;
         default:
@@ -526,54 +545,43 @@ export async function startBot(): Promise<void> {
   }
   bot.command("auto", handleAuto);
 
-  bot.callbackQuery(/^pick:(.+)$/, async (ctx) => {
-    const key = ctx.match[1];
-    if (!state.running) {
-      await ctx.answerCallbackQuery({ text: "Список уже неактуален — нажми /start заново.", show_alert: true });
-      return;
-    }
-    if (getLiveState().pendingApproval) {
-      await ctx.answerCallbackQuery({ text: "Сначала подтверди или отмени предыдущее предложение.", show_alert: true });
-      return;
-    }
-    const pendingReview = getLiveState().pendingHumanReview;
-    if (pendingReview) {
-      // Confirming here would re-run createWorktree, which force-removes the existing
-      // worktree first — for the SAME ticket that would destroy the diff this review
-      // is waiting on. Any other ticket is unaffected, but the simplest safe rule is
-      // "resolve what's pending before picking anything else."
-      await ctx.answerCallbackQuery({
-        text: `Сначала прими или отклони ${pendingReview.issueKey} (ждёт решения выше).`,
-        show_alert: true,
-      });
-      return;
-    }
-    if (getLiveState().currentJob) {
-      await ctx.answerCallbackQuery({ text: "Сейчас уже выполняется другая задача.", show_alert: true });
-      return;
-    }
-    // Reproduced live (2026-11-10): without this check, picking while an earlier pick's
-    // analysis is still in flight fell through to the "Анализирую…" placeholder below,
-    // which then got edited into a generic "не удалось начать" once proposeIssueByKey's
-    // own busy guard caught it — reading as a failure worth retrying, not "already
-    // running, just wait". Checking `analyzing` here answers immediately, by name,
-    // before that placeholder ever shows.
-    const alreadyAnalyzing = getLiveState().analyzing;
-    if (alreadyAnalyzing && alreadyAnalyzing !== "searching") {
-      await ctx.answerCallbackQuery({
-        text: `${alreadyAnalyzing} уже анализируется — подожди, это недолго.`,
-        show_alert: true,
-      });
-      return;
-    }
-    await ctx.answerCallbackQuery({ text: "Анализирую…" });
+  function nothingToDoKeyboard(issueKey: string): InlineKeyboard {
+    return new InlineKeyboard()
+      .text(NOTHING_BUTTONS.backend, `force:${issueKey}:backend`)
+      .text(NOTHING_BUTTONS.frontend, `force:${issueKey}:frontend`)
+      .row()
+      .text(NOTHING_BUTTONS.skip, `skipnone:${issueKey}`);
+  }
 
+  // Why a new analysis can't start right now, in words — or null when it can. One rule
+  // for every way of asking (ticket menu, "do it anyway" button, chat message).
+  function whyCannotPropose(): string | null {
+    const live = getLiveState();
+    if (live.pendingApproval) return `Сначала реши по предложению ${live.pendingApproval.issueKey}: взять в работу или не брать.`;
+    // Confirming another ticket would re-run createWorktree, which force-removes the
+    // existing worktree first — for the SAME ticket that would destroy the diff this
+    // review is waiting on. Simplest safe rule: resolve what's pending first.
+    if (live.pendingHumanReview) return `Сначала реши по ${live.pendingHumanReview.issueKey} — она ждёт решения выше.`;
+    if (live.pendingBrief) return `Сначала ответь на вопрос по ${live.pendingBrief.issueKey}.`;
+    if (live.currentJob) return `Сейчас в работе ${live.currentJob.issueKey} — новую задачу возьму после неё.`;
+    if (live.analyzing && live.analyzing !== "searching") return `${live.analyzing} уже анализируется — подожди, это недолго.`;
+    return null;
+  }
+
+  // Analyse a ticket and turn the placeholder message into the result. Shared by the
+  // ticket menu, the "do it anyway" buttons and the chat assistant.
+  async function runPropose(ctx: Context, key: string, opts: ScopeOptions = {}): Promise<void> {
     // Reproduced live: a multi-minute silent gap while Claude reads a real codebase
     // reads as "it's stuck", not "it's thinking" — say so up front, then edit this
     // same message into the finished proposal below.
-    const msg = await ctx.reply(`${headline("analysis", key)}\nИзучаю код бэкенда и фронтенда и готовлю план — обычно 2–6 минут ⏳`);
+    const where = opts.forceRepo ? `Изучаю ${REPO_RU[opts.forceRepo]} с установкой «изменения нужны»` : "Изучаю код бэкенда и фронтенда";
+    const msg = await ctx.reply(`${headline("analysis", key)}\n${where} и готовлю план — обычно 2–6 минут ⏳${opts.note ? `\nТвоё указание: ${opts.note}` : ""}`);
+    const show = (text: string, keyboard?: InlineKeyboard): Promise<unknown> =>
+      ctx.api
+        .editMessageText(ctx.chat!.id, msg.message_id, fitTelegram(text), keyboard ? { reply_markup: keyboard } : {})
+        .catch(() => sendSafe(ctx.chat!.id, text, keyboard));
     try {
-      const outcome = await proposeIssueByKey(key);
+      const outcome = await proposeIssueByKey(key, undefined, opts);
       if (outcome.kind === "proposed") {
         const keyboard = new InlineKeyboard()
           .text(PROPOSAL_BUTTONS.confirm, `confirm:${outcome.proposal.issueKey}`)
@@ -584,30 +592,64 @@ export async function startBot(): Promise<void> {
           .then(() => true)
           .catch(() => false);
         if (!editedOk) await sendSafe(ctx.chat!.id, text, keyboard, "MarkdownV2");
+      } else if (outcome.kind === "nothing_to_do") {
+        // The analysis was paid for whatever is decided next — count it now, once.
+        recordTask(state, { issueKey: outcome.issueKey, outcome: "skipped", detail: "анализ: менять нечего", costUsd: outcome.costUsd, timestamp: new Date().toISOString() });
+        await show(composeNothingToDoText(outcome), nothingToDoKeyboard(outcome.issueKey));
       } else if (outcome.kind === "skipped") {
-        await ctx.api
-          .editMessageText(ctx.chat!.id, msg.message_id, fitTelegram(`${headline("skipped", outcome.issueKey)}\n${outcome.reason}`))
-          .catch(() => ctx.reply(fitTelegram(`${headline("skipped", outcome.issueKey)}\n${outcome.reason}`)));
+        await show(`${headline("skipped", outcome.issueKey)}\n${outcome.reason}`);
       } else if (outcome.kind === "paused") {
-        await ctx.api
-          .editMessageText(ctx.chat!.id, msg.message_id, `${headline("paused")}\n${outcome.reason}`)
-          .catch(() => ctx.reply(`${headline("paused")}\n${outcome.reason}`));
+        await show(`${headline("paused")}\n${outcome.reason}`);
       } else {
-        // awaiting_approval / busy: a narrow residual race between the guards above
-        // and proposeIssueByKey's own internal check (there's an `await` in between —
-        // answerCallbackQuery — so it's not fully closed). Name what's actually busy
-        // when we know it, instead of a generic "failed, try again".
-        const busyText =
+        // awaiting_approval / busy: a narrow residual race between the caller's guard
+        // and proposeIssueByKey's own internal check. Name what's actually busy when
+        // we know it, instead of a generic "failed, try again".
+        await show(
           outcome.kind === "busy" && outcome.busyWith
             ? `${outcome.busyWith} уже обрабатывается — подожди, это недолго.`
-            : "Уже занято другой задачей — подожди, это недолго.";
-        await ctx.api.editMessageText(ctx.chat!.id, msg.message_id, busyText).catch(() => {});
+            : "Уже занято другой задачей — подожди, это недолго.",
+        );
       }
     } catch (err) {
-      await ctx.api
-        .editMessageText(ctx.chat!.id, msg.message_id, fitTelegram(`${headline("error", key)}\nАнализ не удался: ${(err as Error).message}`))
-        .catch(() => ctx.reply(fitTelegram(`${headline("error", key)}\nАнализ не удался: ${(err as Error).message}`)));
+      await show(`${headline("error", key)}\nАнализ не удался: ${(err as Error).message}`);
     }
+  }
+
+  bot.callbackQuery(/^pick:(.+)$/, async (ctx) => {
+    const key = ctx.match[1];
+    if (!state.running) {
+      await ctx.answerCallbackQuery({ text: "Список уже неактуален — нажми /start заново.", show_alert: true });
+      return;
+    }
+    const blocked = whyCannotPropose();
+    if (blocked) {
+      await ctx.answerCallbackQuery({ text: blocked, show_alert: true });
+      return;
+    }
+    await ctx.answerCallbackQuery({ text: "Анализирую…" });
+    await runPropose(ctx, key);
+  });
+
+  // "Do it anyway" after an analysis that found nothing to change.
+  bot.callbackQuery(/^force:([^:]+):(backend|frontend)$/, async (ctx) => {
+    const key = ctx.match[1];
+    const repo = ctx.match[2] as "backend" | "frontend";
+    const blocked = whyCannotPropose();
+    if (blocked) {
+      await ctx.answerCallbackQuery({ text: blocked, show_alert: true });
+      return;
+    }
+    await ctx.answerCallbackQuery({ text: "Анализирую ещё раз…" });
+    const original = ctx.callbackQuery.message?.text ?? key;
+    await ctx.editMessageText(fitTelegram(`${original}\n\n🛠 Выбрано: сделать в ${repo === "backend" ? "бэкенде" : "фронтенде"}.`)).catch(() => {});
+    await runPropose(ctx, key, { forceRepo: repo });
+  });
+
+  bot.callbackQuery(/^skipnone:(.+)$/, async (ctx) => {
+    await ctx.answerCallbackQuery({ text: "Пропускаю" });
+    const original = ctx.callbackQuery.message?.text ?? ctx.match[1];
+    await ctx.editMessageText(fitTelegram(`${original}\n\n✖️ Пропущено. Тикет оставлен как есть.`)).catch(() => {});
+    await sendTicketMenu(ctx, "Что дальше?");
   });
 
   async function handleStop(ctx: Context): Promise<void> {
@@ -758,7 +800,11 @@ export async function startBot(): Promise<void> {
     await ctx.editMessageText(fitTelegram(original + (config.autopilot.enabled
             ? "\n\n▶️ Взято в работу. Доведу до MR сам: вопросы решу сам, при сбое попробую исправить. Раз в 5 минут пишу, что делаю."
             : "\n\n▶️ Взято в работу. Раз в 5 минут буду писать, что сейчас делаю."))).catch(() => {});
+    startConfirmedWork(ctx, key);
+  });
 
+  // Shared by the "▶️ Взять в работу" button and the chat assistant's `confirm`.
+  function startConfirmedWork(ctx: Context, key: string): void {
     confirmPending()
       .then(drive)
       .then(async (outcome) => {
@@ -785,15 +831,10 @@ export async function startBot(): Promise<void> {
         await sendTicketMenu(ctx, "Что дальше?");
       })
       .catch((err: Error) => sendSafe(ctx.chat!.id, `${headline("error", key)}\nНе получилось запустить: ${err.message}\nПредложение сохранено — можно снова нажать «${PROPOSAL_BUTTONS.confirm}».`));
-  });
+  }
 
-  bot.callbackQuery(/^cancel:(.+)$/, async (ctx) => {
-    const key = ctx.match[1];
-    const pending = getLiveState().pendingApproval;
-    if (!pending || pending.issueKey !== key) {
-      await ctx.answerCallbackQuery({ text: "Это предложение уже неактуально.", show_alert: true });
-      return;
-    }
+  // Shared by the "✖️ Не брать" button and the chat assistant's `cancel`.
+  function dropPendingProposal(): void {
     const cancelled = cancelPending();
     if (cancelled) {
       // Direct recordTask, not the generic recordOutcome helper: the analysis
@@ -807,6 +848,16 @@ export async function startBot(): Promise<void> {
         timestamp: new Date().toISOString(),
       });
     }
+  }
+
+  bot.callbackQuery(/^cancel:(.+)$/, async (ctx) => {
+    const key = ctx.match[1];
+    const pending = getLiveState().pendingApproval;
+    if (!pending || pending.issueKey !== key) {
+      await ctx.answerCallbackQuery({ text: "Это предложение уже неактуально.", show_alert: true });
+      return;
+    }
+    dropPendingProposal();
     await ctx.answerCallbackQuery({ text: "Не берём 🙅" });
     const original = ctx.callbackQuery.message?.text ?? `${key}`;
     await ctx.editMessageText(fitTelegram(original + "\n\n✖️ Не берём. Повторно не предложу до перезапуска бота.")).catch(() => {});
@@ -1011,109 +1062,13 @@ export async function startBot(): Promise<void> {
       .catch((err: Error) => sendSafe(ctx.chat!.id, `❌ ${key}: не удалось продолжить — ${err.message}`));
   });
 
-  // Free-form chat: anything that isn't a recognized slash command. A tiny Claude turn
-  // (no tools — pure text classification) decides whether it maps to one of the real
-  // commands or is just conversation. It only ever picks WHICH existing handler to call;
-  // the handler itself fetches the real data, so a chat answer about status/budget/etc.
-  // can never be a hallucinated number — only "chat" replies are Claude's own words.
-  interface ChatIntent {
-    intent: "status" | "metrics" | "budget" | "list" | "peek" | "kill" | "help" | "retry" | "chat";
-    key?: string;
-    reply?: string;
-  }
-
-  function parseChatIntent(raw: string): ChatIntent {
-    const cleaned = raw.trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
-    try {
-      const parsed: unknown = JSON.parse(cleaned);
-      if (parsed && typeof parsed === "object" && typeof (parsed as ChatIntent).intent === "string") {
-        return parsed as ChatIntent;
-      }
-    } catch {
-      // Claude didn't return valid JSON — fall back to treating its raw text as a chat reply
-      // rather than failing outright; still better than silence.
-    }
-    return { intent: "chat", reply: raw.trim() || "Не понял, можешь переформулировать?" };
-  }
-
-  // This is the actual conversational half of the "Зам. CEO" persona — everywhere else
-  // in this file reports structured outcomes, but a free-text message is exactly where
-  // the user is talking to someone, not clicking a button. The model answers in
-  // character, but never invents bot data: a request for real numbers (cost/status/
-  // queue) always becomes an intent the bot resolves with real data, never a guessed
-  // "chat" reply.
-  async function classifyMessage(text: string): Promise<ChatIntent> {
-    const prompt = [
-      "Ты — Зам. CEO внутри бота jira-harness: ты на прямой связи с CEO по работе над",
-      "тикетами из Jira. Любое его сообщение без команды попадает сюда. Если ответ требует",
-      "РЕАЛЬНЫХ живых данных (расход, статус, очередь) — не выдумывай их сам, выбери",
-      "соответствующий intent: бот сходит за настоящими данными и пришлёт их отдельным",
-      "сообщением, это и есть смысл JSON-метки ниже.",
-      "",
-      "Ответь СТРОГО одним JSON-объектом, без текста до/после и без markdown-разметки,",
-      "одной из форм:",
-      "",
-      '{"intent":"status"} — что сейчас происходит, запущено ли, что последнее обработано',
-      '{"intent":"metrics"} — исторический трек-рекорд: доля задач без эскалации, средние',
-      "  стоимость/время/раунды ревью за всё время (не про бюджет на сегодня — это budget)",
-      '{"intent":"budget"} — расход/бюджет/сколько потрачено/сколько задач за сегодня',
-      '{"intent":"list"} — показать список задач / начать работу над чем-то / что взять в работу',
-      '{"intent":"peek"} — глянуть следующую задачу в очереди, не запуская',
-      '{"intent":"kill"} — остановить/прервать текущую работу',
-      '{"intent":"retry","key":"XEN-123"} — вернуть конкретный тикет (укажи ключ) в очередь',
-      '{"intent":"help"} — что ты умеешь / как тобой пользоваться',
-      '{"intent":"chat","reply":"..."} — когда сообщение не про живые данные и не про одну из',
-      "  команд выше (обычный разговор, вопрос не по теме, благодарность и т.п.). reply —",
-      "  твой ответ ОТ СВОЕГО ЛИЦА: по-деловому, но по-человечески, коротко, на русском,",
-      "  без канцелярита и без фраз вроде «я бот/ассистент». Не выдумывай цифры бота здесь —",
-      "  если нужны именно они, это всегда status/metrics/budget/list/peek, а не chat.",
-      "",
-      // Reproduced live: without this, a casual question about how the bot handles a
-      // hard task got two DIFFERENT invented answers in a row ("делю на подзадачи, ищу
-      // аналоги в кодбейсе" — not a real behavior at all) — confident-sounding but
-      // false, because Haiku had no actual facts to ground a "chat" reply in and just
-      // freestyled something plausible each time. If the CEO asks how/why the bot does
-      // something, answer using ONLY these real facts, never invented behavior:
-      "Если вопрос — о том, как или почему ты (бот) что-то делаешь, отвечай ТОЛЬКО этими",
-      "реальными фактами о механике, ничего не придумывая сверх них:",
-      "- Реализация: до MAX_ITERATIONS попыток одной сессией; после каждой — гейты",
-      "  (typecheck/lint/test/build/acceptance), провал — фидбек той же сессии дальше.",
-      "- Та же ошибка гейта два раза подряд (stuck), лимит бюджета/итераций, или слишком",
-      "  раздувшийся контекст сессии (риск деградации ответов) — останавливаюсь и зову",
-      "  тебя, сам ничего не выдумываю взамен.",
-      "- По-настоящему неоднозначный момент при реализации — присылаю бриф с вариантами",
-      "  вместо того, чтобы угадывать самому.",
-      "- После успешной реализации — независимое ревью другой моделью; блокирующие",
-      "  замечания уходят на фикс мне же, не сразу тебе.",
-      "- Любая такая остановка — не провал, а решение, которое жду от тебя: принять",
-      "  диф как есть, отклонить, или (только для лимита контекста) продолжить заново",
-      "  свежей сессией.",
-      "",
-      'Сомневаешься между командой и chat — выбирай команду: худший случай — лишний,',
-      "но верный ответ, а не отказ там, где ты мог помочь.",
-      "",
-      `Сообщение CEO: "${text}"`,
-    ].join("\n");
-
-    const turn = await runClaudeTurn({
-      // Not the harness's own directory: nothing here needs files, and an empty temp
-      // dir means there's nothing to read even if a tool slipped through.
-      cwd: tmpdir(),
-      prompt,
-      permissionMode: "acceptEdits",
-      // Pure classification — no file/shell access needed or wanted.
-      disallowedToolsOverride: "Bash,Edit,Write,MultiEdit,Read,Grep,Glob,WebFetch,WebSearch,NotebookEdit,Task",
-      model: config.models.chat,
-      // A chat reply isn't task work — /kill must not hit it (see processRegistry.ts).
-      killable: false,
-    });
-    return parseChatIntent(turn.resultText);
-  }
-
+  // Free-form chat: anything that isn't a slash command goes to the assistant
+  // (assistant.ts) — it answers from the chat, the bot's state and the code, and may
+  // ask for one bot command, which is executed here by the same handlers the slash
+  // commands and buttons use. The handlers fetch the real data, so a number in a
+  // /status or /budget answer is never the model's own.
   bot.on("message:text", async (ctx) => {
     const text = ctx.message.text.trim();
-    // Slash commands are handled by the registrations above; an unmatched one (typo,
-    // unknown command) falls through to here too — don't hand that to the classifier.
     if (!text) return;
     if (text.startsWith("/")) {
       // A mistyped command used to get no answer at all.
@@ -1122,54 +1077,79 @@ export async function startBot(): Promise<void> {
     }
 
     const thinking = await ctx.reply("💬 Думаю…");
-    const clear = () => ctx.api.deleteMessage(ctx.chat!.id, thinking.message_id).catch(() => {});
     try {
-      const parsed = await classifyMessage(text);
-      switch (parsed.intent) {
+      const chat = chatLog.recent();
+      chatLog.add("user", text);
+      // Best effort: without the ticket's own text the assistant can only restate what
+      // the bot said about it.
+      const jira = new JiraClient(config.jira.baseUrl, config.jira.token);
+      const tickets = (
+        await Promise.all(
+          ticketKeysIn(text, chat).map((key) =>
+            jira
+              .getIssue(key)
+              .then((i) => ({ key: i.key, summary: i.summary, description: i.description }))
+              .catch(() => null),
+          ),
+        )
+      ).filter((t): t is { key: string; summary: string; description: string } => t !== null);
+      const { reply, action } = await askAssistant({
+        message: text,
+        chat,
+        tickets,
+        live: getLiveState(),
+        history: state.history,
+        repos: { backend: config.repos.backend.path || undefined, frontend: config.repos.frontend.path || undefined },
+      });
+      if (reply) {
+        await ctx.api.editMessageText(ctx.chat!.id, thinking.message_id, fitTelegram(reply)).catch(() => ctx.reply(fitTelegram(reply)));
+      } else {
+        await ctx.api.deleteMessage(ctx.chat!.id, thinking.message_id).catch(() => {});
+      }
+      if (!action) return;
+      switch (action.type) {
         case "status":
-          await clear();
-          await handleStatus(ctx);
-          break;
+          return void (await handleStatus(ctx));
         case "metrics":
-          await clear();
-          await handleMetrics(ctx);
-          break;
+          return void (await handleMetrics(ctx));
         case "budget":
-          await clear();
-          await handleBudget(ctx);
-          break;
+          return void (await handleBudget(ctx));
         case "list":
-          await clear();
-          await sendTicketMenu(ctx, undefined, { resume: true });
-          break;
+          return void (await sendTicketMenu(ctx, undefined, { resume: true }));
         case "peek":
-          await clear();
-          await handlePeek(ctx);
-          break;
+          return void (await handlePeek(ctx));
         case "kill":
-          await clear();
-          await handleKill(ctx);
-          break;
+          return void (await handleKill(ctx));
+        case "stop":
+          return void (await handleStop(ctx));
+        case "auto":
+          return void (await handleAuto(ctx));
         case "help":
-          await clear();
-          await handleHelp(ctx);
-          break;
-        case "retry": {
-          const key = parsed.key?.trim().toUpperCase();
-          await clear();
-          if (key && /^[A-Z]+-\d+$/.test(key)) await handleRetry(ctx, key);
-          else await ctx.reply("Не понял, какой тикет вернуть в очередь — укажи ключ вида XEN-123.");
-          break;
+          return void (await handleHelp(ctx));
+        case "retry":
+          return void (await handleRetry(ctx, action.key));
+        case "propose": {
+          const blocked = whyCannotPropose();
+          if (blocked) return void (await ctx.reply(blocked));
+          return void (await runPropose(ctx, action.key, { forceRepo: action.repo, note: action.note }));
         }
-        case "chat":
-        default:
-          await ctx.api
-            .editMessageText(ctx.chat!.id, thinking.message_id, parsed.reply || "Не понял, можешь переформулировать?")
-            .catch(() => ctx.reply(parsed.reply || "Не понял, можешь переформулировать?"));
+        case "confirm": {
+          const pending = getLiveState().pendingApproval;
+          if (!pending) return void (await ctx.reply("Сейчас нет предложения, которое ждёт подтверждения."));
+          await ctx.reply(`▶️ ${pending.issueKey}: взято в работу. Раз в 5 минут пишу, что делаю.`);
+          return void startConfirmedWork(ctx, pending.issueKey);
+        }
+        case "cancel": {
+          const pending = getLiveState().pendingApproval;
+          if (!pending) return void (await ctx.reply("Сейчас нет предложения, которое можно отменить."));
+          dropPendingProposal();
+          await ctx.reply(`✖️ ${pending.issueKey}: не берём.`);
+          return void (await sendTicketMenu(ctx, "Что дальше?"));
+        }
       }
     } catch (err) {
       await ctx.api
-        .editMessageText(ctx.chat!.id, thinking.message_id, `❌ Не удалось обработать: ${(err as Error).message}`)
+        .editMessageText(ctx.chat!.id, thinking.message_id, fitTelegram(`${headline("error")}\nНе смог ответить: ${(err as Error).message}`))
         .catch(() => {});
     }
   });

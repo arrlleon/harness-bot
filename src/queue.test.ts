@@ -188,3 +188,10 @@ test("approvedScope passes through the three known scopes and nothing else", () 
   assert.equal(approvedScope("ambiguous"), undefined);
   assert.equal(approvedScope(""), undefined);
 });
+
+test("withHumanNote appends the human's instruction to the task description, or leaves it alone", async () => {
+  const { withHumanNote } = await import("./queue.js");
+  assert.equal(withHumanNote("описание", undefined), "описание");
+  assert.equal(withHumanNote("описание", "  "), "описание");
+  assert.match(withHumanNote("описание", "запрети удаление"), /^описание\n\nУказание руководителя[^:]*: запрети удаление$/);
+});
