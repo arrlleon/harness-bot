@@ -34,6 +34,8 @@ export class JiraClient {
 
   private async request(path: string, init?: RequestInit): Promise<unknown> {
     const res = await fetch(`${this.baseUrl}${path}`, {
+      // A Jira that never answers must fail the one call, not hang the task behind it.
+      signal: AbortSignal.timeout(60_000),
       ...init,
       headers: {
         Authorization: `Bearer ${this.token}`,

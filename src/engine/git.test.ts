@@ -17,6 +17,7 @@ import {
   fetchFreshBase,
   rebaseOntoFreshBase,
   mergeFreshBase,
+  fetchBranch,
 } from "./git.js";
 
 const execFileAsync = promisify(execFile);
@@ -560,6 +561,43 @@ test("mergeFreshBase merges cleanly when dev's changes don't overlap", async () 
     assert.equal(await readFile(join(dir, "README.md"), "utf8"), "initial\ndev version\n");
   } finally {
     await cleanup(local, branch);
+    await rm(origin, { recursive: true, force: true });
+  }
+});
+
+// Reproduced live (XEN-541): GitLab stopped answering git, and with no timeout the task
+// hung 13 minutes at its first step. A fake remote that never answers stands in for it.
+test("fetchBranch gives up after GIT_FETCH_TIMEOUT_MS instead of hanging, and says so", async () => {
+  const { origin, local } = await makeRepoWithRemote();
+  const hang = join(local, "hang.sh");
+  await writeFile(hang, "#!/bin/sh\nsleep 60\n", { mode: 0o755 });
+  await execFileAsync("git", ["config", "remote.origin.uploadpack", hang], { cwd: local });
+  process.env.GIT_FETCH_TIMEOUT_MS = "700";
+  try {
+    const started = Date.now();
+    const result = await fetchBranch(local, "dev");
+    assert.equal(result.ok, false);
+    assert.match((result as { reason: string }).reason, /не ответил за/);
+    assert.ok(Date.now() - started < 10_000, "must not wait for the remote");
+  } finally {
+    delete process.env.GIT_FETCH_TIMEOUT_MS;
+    await rm(local, { recursive: true, force: true });
+    await rm(origin, { recursive: true, force: true });
+  }
+});
+
+test("fetchFreshBase falls back to the last fetched origin/<branch> with a warning when the remote is unreachable", async () => {
+  const { origin, local } = await makeRepoWithRemote();
+  await execFileAsync("git", ["remote", "set-url", "origin", join(origin, "does-not-exist")], { cwd: local });
+  const warnings: string[] = [];
+  try {
+    assert.equal(await fetchFreshBase(local, "dev", (line) => warnings.push(line)), "origin/dev");
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /начинаю с последней скачанной версии/);
+    // No local copy of the branch at all: a clear error, not a hang and not a guess.
+    await assert.rejects(fetchFreshBase(local, "no-such-branch"), /начать не с чего/);
+  } finally {
+    await rm(local, { recursive: true, force: true });
     await rm(origin, { recursive: true, force: true });
   }
 });

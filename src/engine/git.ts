@@ -67,8 +67,46 @@ export async function lockfileDrift(repoPath: string, worktreeDir: string): Prom
   return null;
 }
 
-export async function fetchFreshBase(repoPath: string, targetBranch: string): Promise<string> {
-  await execFileAsync("git", ["fetch", "origin", targetBranch], { cwd: repoPath });
+// Every `git fetch` the harness does goes through here: bounded, never prompting,
+// never throwing. Reproduced live (XEN-541, 2026-11-16): GitLab answered its API in
+// 19 seconds and a fetch not at all — with no timeout the task sat for 13 minutes at
+// its very first step and then failed, having done nothing. A fetch only refreshes
+// `origin/<branch>`; when it can't, the ref from the last successful fetch is still
+// there and still a valid (slightly older) base, so the caller carries on with it.
+export async function fetchBranch(cwd: string, branch: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const timeoutMs = Number(process.env.GIT_FETCH_TIMEOUT_MS) || 90_000;
+  try {
+    await execFileAsync("git", ["fetch", "origin", branch], {
+      cwd,
+      timeout: timeoutMs,
+      killSignal: "SIGKILL",
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    });
+    return { ok: true };
+  } catch (err) {
+    const e = err as { killed?: boolean; stderr?: string; message: string };
+    const reason = e.killed ? `не ответил за ${Math.round(timeoutMs / 1000)} с` : (e.stderr?.trim().split("\n").pop() ?? e.message).slice(0, 200);
+    return { ok: false, reason };
+  }
+}
+
+async function refExists(cwd: string, ref: string): Promise<boolean> {
+  return execFileAsync("git", ["rev-parse", "-q", "--verify", ref], { cwd }).then(
+    () => true,
+    () => false,
+  );
+}
+
+export async function fetchFreshBase(repoPath: string, targetBranch: string, onWarn?: (line: string) => void): Promise<string> {
+  const fetched = await fetchBranch(repoPath, targetBranch);
+  if (!fetched.ok) {
+    // No copy of the branch at all means there is nothing to start from — that one is
+    // a real failure, said in words rather than as a hung process.
+    if (!(await refExists(repoPath, `origin/${targetBranch}`))) {
+      throw new Error(`GitLab недоступен (${fetched.reason}), а локальной копии origin/${targetBranch} нет — начать не с чего`);
+    }
+    onWarn?.(`⚠️ GitLab не отдал свежий ${targetBranch} (${fetched.reason}) — начинаю с последней скачанной версии. MR может потребовать обновления ветки.`);
+  }
   return `origin/${targetBranch}`;
 }
 
@@ -103,7 +141,7 @@ export interface RebaseOutcome {
 // message says to check `git stash list` for that case.
 export async function rebaseOntoFreshBase(worktreeDir: string, targetBranch: string): Promise<RebaseOutcome> {
   const { stdout: before } = await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: worktreeDir });
-  await execFileAsync("git", ["fetch", "origin", targetBranch], { cwd: worktreeDir });
+  await fetchBranch(worktreeDir, targetBranch); // unreachable GitLab: rebase onto the last fetched copy
   // getWorktreeDiff leaves new files as intent-to-add entries in the index, and git
   // cannot stash those: the autostash failed with "Entry '<new file>' not uptodate.
   // Cannot merge" and the task was reported as a rebase conflict with nothing to
@@ -130,7 +168,7 @@ export async function rebaseOntoFreshBase(worktreeDir: string, targetBranch: str
 // commitAll) sees a normal branch, and the agent's job is to remove the markers.
 export async function mergeFreshBase(worktreeDir: string, targetBranch: string): Promise<{ conflictedFiles: string[] }> {
   await execFileAsync("git", ["reset", "-q"], { cwd: worktreeDir }); // drop intent-to-add entries (see rebaseOntoFreshBase)
-  await execFileAsync("git", ["fetch", "origin", targetBranch], { cwd: worktreeDir });
+  await fetchBranch(worktreeDir, targetBranch); // unreachable GitLab: merge the last fetched copy
   await commitAll(worktreeDir, "WIP: работа задачи перед слиянием свежего dev\n\nAutomated by jira-harness.");
   try {
     await execFileAsync("git", ["merge", "--no-edit", `origin/${targetBranch}`], { cwd: worktreeDir });
@@ -196,8 +234,11 @@ export async function commitAll(worktreeDir: string, message: string): Promise<b
 // there's no such remote at all (this project's own test repos have none) rather than
 // hard-failing the whole diff over it.
 async function resolveDiffBase(worktreeDir: string, baseBranch: string): Promise<string> {
+  // A failed fetch must not change the answer: the merge-base against the last fetched
+  // origin/<baseBranch> is still the right fork point. (It used to fall through to the
+  // plain local branch name, which is the stale ref this function exists to avoid.)
+  await fetchBranch(worktreeDir, baseBranch);
   try {
-    await execFileAsync("git", ["fetch", "origin", baseBranch], { cwd: worktreeDir });
     const { stdout } = await execFileAsync("git", ["merge-base", "HEAD", `origin/${baseBranch}`], { cwd: worktreeDir });
     return stdout.trim();
   } catch {

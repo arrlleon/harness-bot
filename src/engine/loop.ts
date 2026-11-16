@@ -410,7 +410,7 @@ async function runCloseLoopInner(task: TaskSpec, config: EngineConfig, setup: Lo
     (await createWorktree(
       config.repoPath,
       config.branchName,
-      config.freshBase ? await fetchFreshBase(config.repoPath, config.freshBase.baseBranch) : undefined,
+      config.freshBase ? await fetchFreshBase(config.repoPath, config.freshBase.baseBranch, config.onLog) : undefined,
     ));
 
   // A resume (any of the three kinds) can have sat paused for hours or days waiting on
