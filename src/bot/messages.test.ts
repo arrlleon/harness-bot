@@ -102,3 +102,13 @@ test("composeNothingToDoText is a short decision message, not a wall of text", a
   assert.match(text, /Анализ стоил \$0\.74/);
   assert.ok(text.length < 1200, `got ${text.length}`);
 });
+
+test("accountLimitIn reads the reset time; explainStop says it in plain words", async () => {
+  const { accountLimitIn } = await import("./messages.js");
+  const reason = "agent_error: You've hit your session limit · resets 8:40pm (Asia/Almaty)";
+  assert.deepEqual(accountLimitIn(reason), { resetsAt: "8:40pm" });
+  assert.equal(accountLimitIn("max_iterations"), null);
+  const { why, fix } = explainStop(reason);
+  assert.match(why, /^Кончился лимит аккаунта Claude \(сбросится в 8:40pm\)/);
+  assert.match(fix, /после сброса лимита/);
+});

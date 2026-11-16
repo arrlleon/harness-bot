@@ -44,8 +44,25 @@ export interface StopExplanation {
 // The reason strings come from queue.ts (buildFailureReason, escalateFailure, the
 // push/MR path and the cross-repo wrappers). Matched by their leading code; anything
 // unrecognised still gets a readable sentence rather than the raw text.
+// The Claude account's own usage limit, as the CLI words it ("You've hit your session
+// limit · resets 8:40pm (Asia/Almaty)"). Nothing the bot does fixes this — only time.
+const ACCOUNT_LIMIT = /hit your (?:session |usage |weekly )?limit|usage limit reached|rate limit/i;
+
+export function accountLimitIn(reason: string): { resetsAt: string | null } | null {
+  if (!ACCOUNT_LIMIT.test(reason)) return null;
+  return { resetsAt: /resets\s+([^·)\n]+?)(?:\s*\(|\s*·|\s*$|\))/i.exec(reason)?.[1]?.trim() ?? null };
+}
+
 export function explainStop(reason: string): StopExplanation {
   const r = reason.trim();
+  const limit = accountLimitIn(r);
+  if (limit) {
+    return {
+      why: `Кончился лимит аккаунта Claude${limit.resetsAt ? ` (сбросится в ${limit.resetsAt})` : ""} — работа сохранена, код от этого не пострадал.`,
+      continueUseful: true,
+      fix: "после сброса лимита агент продолжит с того же места",
+    };
+  }
   const cross = /^(backend|frontend): ([\s\S]*)$/.exec(r);
   if (cross) {
     const inner = explainStop(cross[2].replace(/\s*\(backend already opened: [^)]*\)\s*$/, ""));

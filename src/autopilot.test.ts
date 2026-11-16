@@ -30,3 +30,11 @@ test("fixBudgetExtension: a fresh allowance by default, never past the task cap 
   assert.equal(fixBudgetExtension(70, 40, 80), 40); // run may reach 80: 10 more
   assert.equal(fixBudgetExtension(10, 40, 30), 0);
 });
+
+// XEN-541, live: both automatic fixes were spent on attempts that died on the limit.
+test("shouldAutoFix never retries on the account's usage limit", () => {
+  const limited = { reason: "agent_error: You've hit your session limit · resets 8:40pm (Asia/Almaty)", costUsd: 9, resumeState: {} };
+  assert.equal(shouldAutoFix(limited, 0, limits), false);
+  const reviewLimited = { reason: "review_blocked после 1 раунд(ов) с разработчиком: ревью не состоялось (ход завершился ошибкой: You've hit your session limit · resets 8:40pm (Asia/Almaty))", costUsd: 9, resumeState: {} };
+  assert.equal(shouldAutoFix(reviewLimited, 0, limits), false);
+});

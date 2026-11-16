@@ -1,7 +1,7 @@
 import { config } from "./config.js";
 import { autoFixNeedsHuman, canAutoFix, isPushFailure, resolveBrief, resolveHumanReview } from "./queue.js";
 import { getLiveState } from "./bot/liveState.js";
-import { explainStop, headline } from "./bot/messages.js";
+import { accountLimitIn, explainStop, headline } from "./bot/messages.js";
 import type { QueueRunOutcome } from "./types.js";
 
 // Once a plan is approved, the bot takes the task to an MR on its own: a question the
@@ -35,6 +35,10 @@ export function shouldAutoFix(
 ): boolean {
   if (fixesSoFar >= limits.maxFixes) return false;
   if (!canAutoFix(pending)) return false;
+  // Reproduced live (XEN-541, 2026-11-16): the account limit ran out mid-review and the
+  // autopilot spent both of its fixes on attempts that failed the same second. Only
+  // time fixes this one; the human gets the message (with the reset time) instead.
+  if (accountLimitIn(pending.reason)) return false;
   // A push/MR retry costs nothing; an agent run needs money left under the cap.
   return isPushFailure(pending.reason) || pending.costUsd < limits.taskCapUsd - 1;
 }
@@ -67,7 +71,12 @@ export async function driveToEnd(first: QueueRunOutcome | null, hooks: Autopilot
     if (outcome.kind === "needs_human") {
       const pending = getLiveState().pendingHumanReview;
       if (!pending || !shouldAutoFix(pending, fixes, { maxFixes: config.autopilot.maxFixes, taskCapUsd: config.autopilot.taskCapUsd })) {
-        if (fixes > 0 && pending) {
+        const limit = pending ? accountLimitIn(pending.reason) : null;
+        if (limit && pending) {
+          await hooks.notify(
+            `${headline("decision", pending.issueKey)}\nКончился лимит аккаунта Claude${limit.resetsAt ? ` — сбросится в ${limit.resetsAt}` : ""}. Сам не перезапускаю: до сброса любая попытка сразу упадёт. После сброса нажми «🛠 Решить самому» в сообщении ниже — агент продолжит с того же места.`,
+          );
+        } else if (fixes > 0 && pending) {
           await hooks.notify(`${headline("decision", pending.issueKey)}\nСам пробовал исправить ${fixes} раз(а) — не вышло. Нужно твоё решение, сообщение с кнопками ниже.`);
         }
         break;
