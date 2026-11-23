@@ -184,7 +184,8 @@ export interface EngineConfig {
   // issue -> dev fixes it -> gates re-run -> review again) — required, not optional:
   // an uncapped negotiation between two agents that might never agree has to have a
   // hard stop, same reasoning as maxIterations for the gate-fixing loop.
-  review?: { model: string; baseBranch: string; maxRounds: number };
+  // fallbackModel: taken over when the account has no credits left for `model` itself.
+  review?: { model: string; fallbackModel?: string; baseBranch: string; maxRounds: number };
   // Absent disables the manual-testing-notes turn — same opt-out shape as
   // acceptanceTest/memory/review. Never blocks anything (unlike review): it's purely
   // informational output for a human tester, surfaced in the Jira success comment.

@@ -147,6 +147,11 @@ export const config = {
     // role: a reviewer built the same way as the implementer is more likely to share
     // its blind spots, not just its strengths.
     review: process.env.REVIEW_MODEL ?? "claude-fable-5-1",
+    // The account's credits for the review model can run out on their own while every
+    // other model still answers ("You're out of usage credits. Switch to another model",
+    // XEN-1023, 2026-11-20) — the task then stopped unreviewed. The review switches to
+    // this one instead; still not the implement model.
+    reviewFallback: process.env.REVIEW_FALLBACK_MODEL ?? "claude-opus-5-5",
     // Writing a tester's walkthrough from a diff + task description is the same
     // bounded-judgment shape as propose/acceptance/memory, not an open-ended loop —
     // Sonnet, same tier as those.

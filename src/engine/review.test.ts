@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildReviewPrompt, parseReviewResponse, buildReviewFixPrompt, formatReviewRound, isReviewResponseWellFormed } from "./review.js";
+import { buildReviewPrompt, parseReviewResponse, buildReviewFixPrompt, formatReviewRound, isReviewResponseWellFormed, nextReviewModel } from "./review.js";
 import type { ReviewFinding, TaskSpec } from "../types.js";
 
 const task: TaskSpec = {
@@ -111,4 +111,15 @@ test("formatReviewRound writes НЕТ for an empty section, not an empty list", 
 test("formatReviewRound reports the turn's own failure reason instead of guessing at findings", () => {
   const text = formatReviewRound([], "ход завершился ошибкой: timeout");
   assert.match(text, /Ревью не удалось провести: ход завершился ошибкой: timeout/);
+});
+
+test("nextReviewModel switches to the fallback once the model reports it has no credits", () => {
+  const err = "You're out of usage credits. Switch to another model to continue.";
+  assert.equal(nextReviewModel("claude-fable-5-1", "claude-opus-5-5", err), "claude-opus-5-5");
+});
+
+test("nextReviewModel keeps the model on any other error, with no fallback, or when already on it", () => {
+  assert.equal(nextReviewModel("claude-fable-5-1", "claude-opus-5-5", "You've hit your session limit · resets 8:40pm"), "claude-fable-5-1");
+  assert.equal(nextReviewModel("claude-fable-5-1", undefined, "You're out of usage credits."), "claude-fable-5-1");
+  assert.equal(nextReviewModel("claude-opus-5-5", "claude-opus-5-5", "You're out of usage credits."), "claude-opus-5-5");
 });

@@ -131,10 +131,22 @@ export function formatReviewRound(findings: ReviewFinding[], reason: string | un
 // (Edit/Write/Bash denied) so it can explore surrounding code for context, but can
 // never itself change anything — a reviewer that edits the thing it's reviewing isn't
 // independent.
+// The CLI's answer when the account has no credits left for this particular model,
+// while other models still work ("You're out of usage credits. Switch to another model
+// to continue.", XEN-1023). Waiting doesn't help; another model does.
+const MODEL_OUT_OF_CREDITS = /out of usage credits|switch to another model/i;
+
+// Model for the next review attempt: the fallback once the current model reports it has
+// no credits, otherwise the same one. Pure and exported for its own test.
+export function nextReviewModel(current: string, fallback: string | undefined, errorText: string): string {
+  if (!fallback || fallback === current) return current;
+  return MODEL_OUT_OF_CREDITS.test(errorText) ? fallback : current;
+}
+
 export async function reviewChanges(
   worktreeDir: string,
   task: TaskSpec,
-  opts: { model: string; baseBranch: string; maxBudgetUsd?: number },
+  opts: { model: string; fallbackModel?: string; baseBranch: string; maxBudgetUsd?: number },
 ): Promise<ReviewOutcome> {
   // Not caught: an unreadable diff is an infrastructure failure, and reviewing "" would
   // just produce a confident approval of nothing.
@@ -146,18 +158,20 @@ export async function reviewChanges(
   // and the task went on to push unreviewed. One retry, then the caller escalates.
   let costUsd = 0;
   let reason = "";
+  let model = opts.model;
   for (let attempt = 0; attempt < 2; attempt++) {
     const turn = await runClaudeTurn({
       cwd: worktreeDir,
       prompt: buildReviewPrompt(task, diffText),
       permissionMode: "acceptEdits",
       disallowedToolsOverride: "Bash,Edit,Write,MultiEdit",
-      model: opts.model,
+      model,
       maxBudgetUsd: opts.maxBudgetUsd,
     });
     costUsd += turn.totalCostUsd;
     if (turn.isError) {
       reason = `ход завершился ошибкой: ${turn.resultText.slice(0, 200)}`;
+      model = nextReviewModel(model, opts.fallbackModel, turn.resultText);
       continue;
     }
     if (!isReviewResponseWellFormed(turn.resultText)) {
