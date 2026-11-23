@@ -16,6 +16,7 @@ import { writeAcceptanceTest } from "./acceptanceTest.js";
 import { readMemoryFiles, buildMemoryContextBlock, updateProjectMemory } from "./memory.js";
 import { fingerprintFailure } from "./stuckDetector.js";
 import { reviewChanges, buildReviewFixPrompt, formatReviewRound } from "./review.js";
+import { needsHumanDecision } from "./reviewEscalation.js";
 import { generateTestingNotes } from "./testingNotes.js";
 import { generateCloseReport } from "./closeReport.js";
 import { checkGateIntegrity } from "./gateIntegrity.js";
@@ -176,7 +177,7 @@ async function runPostImplementSuccess(
         blocking = reviewFindings.filter((f) => f.blocking);
         if (blocking.length === 0) break; // ревьюер доволен
 
-        if (round === config.review.maxRounds) {
+        if (round === config.review.maxRounds || needsHumanDecision(blocking)) {
           return {
             task,
             success: false,

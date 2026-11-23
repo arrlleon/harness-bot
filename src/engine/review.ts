@@ -1,5 +1,6 @@
 import { runClaudeTurn } from "./claudeEngine.js";
 import { getWorktreeDiff } from "./git.js";
+import { escalateScopeFindings } from "./reviewEscalation.js";
 import type { ReviewFinding, TaskSpec } from "../types.js";
 
 export interface ReviewOutcome {
@@ -52,6 +53,12 @@ export function buildReviewPrompt(task: TaskSpec, diffText: string): string {
     "конвенций проекта, нечитаемый или рискованный код. НЕ повторяй то, что уже",
     "гарантировано прошедшими тестами/типами/сборкой, и не придирайся к стилю,",
     "если он соответствует остальному проекту.",
+    "",
+    "Всегда БЛОКИРУЮЩЕЕ, даже если тебе кажется, что так задумано: изменение расширяет",
+    "чьи-то права или доступ, ослабляет существующую проверку, или меняет поведение,",
+    "о котором задача не просила. Такое решает человек, а не ревьюер. Если этого требует",
+    "сам критерий приёмки или критерий называет поведение «без изменений», хотя код его",
+    "меняет, — так и напиши: критерий противоречит текущему поведению.",
     "",
     "Ответь СТРОГО в этом формате, на русском:",
     "",
@@ -178,7 +185,7 @@ export async function reviewChanges(
       reason = "ответ ревьюера не в ожидаемом формате (нет раздела БЛОКИРУЮЩИЕ)";
       continue;
     }
-    return { findings: parseReviewResponse(turn.resultText), costUsd };
+    return { findings: escalateScopeFindings(parseReviewResponse(turn.resultText)), costUsd };
   }
   return { findings: [], costUsd, reason };
 }

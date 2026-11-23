@@ -123,3 +123,10 @@ test("nextReviewModel keeps the model on any other error, with no fallback, or w
   assert.equal(nextReviewModel("claude-fable-5-1", undefined, "You're out of usage credits."), "claude-fable-5-1");
   assert.equal(nextReviewModel("claude-opus-5-5", "claude-opus-5-5", "You're out of usage credits."), "claude-opus-5-5");
 });
+
+test("buildReviewPrompt makes widened access and out-of-scope behaviour blocking", () => {
+  const prompt = buildReviewPrompt(task, "diff --git a/x b/x");
+  assert.match(prompt, /Всегда БЛОКИРУЮЩЕЕ/);
+  assert.match(prompt, /расширяет\s+чьи-то права или доступ/);
+  assert.match(prompt, /критерий противоречит текущему поведению/);
+});
