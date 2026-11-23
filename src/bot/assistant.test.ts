@@ -76,3 +76,19 @@ test("buildAssistantPrompt includes the ticket text when the conversation is abo
   assert.match(prompt, /### XEN-541: Полный доступ/);
   assert.match(prompt, /заблокировать эндпоинты скачивания, удаления, редактирования/);
 });
+
+test("parseAssistantReply keeps a correction given with the confirmation", () => {
+  const raw = 'Пересоберу план с твоим уточнением.\nДЕЙСТВИЕ: {"type":"confirm","note":"исключение для подписанта и в ссылке пакета"}';
+  assert.deepEqual(parseAssistantReply(raw).action, { type: "confirm", note: "исключение для подписанта и в ссылке пакета" });
+});
+
+test("parseAssistantReply: a plain confirm, or one with an empty note, carries no note", () => {
+  assert.deepEqual(parseAssistantReply('Беру.\nДЕЙСТВИЕ: {"type":"confirm"}').action, { type: "confirm" });
+  assert.deepEqual(parseAssistantReply('Беру.\nДЕЙСТВИЕ: {"type":"confirm","note":"  "}').action, { type: "confirm" });
+});
+
+test("buildAssistantPrompt tells the assistant to pass a plan correction as the confirm note", () => {
+  const prompt = buildAssistantPrompt({ message: "да, но с уточнением", chat: [], live: {} as never, history: [], repos: {} });
+  assert.match(prompt, /\{"type":"confirm","note":"\.\.\."\}/);
+  assert.match(prompt, /без note поправка потеряется/);
+});

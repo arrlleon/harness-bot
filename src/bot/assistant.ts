@@ -57,8 +57,9 @@ export type AssistantAction =
   // Analyse a ticket and send a proposal; `repo` forces where, `note` is the human's
   // instruction carried into the task.
   | { type: "propose"; key: string; repo?: "backend" | "frontend"; note?: string }
-  // Take the proposal that is waiting for approval into work / drop it.
-  | { type: "confirm" }
+  // Take the proposal that is waiting for approval into work / drop it. A `note` on
+  // confirm is a correction to the plan: the plan is redone with it (see bot.ts).
+  | { type: "confirm"; note?: string }
   | { type: "cancel" };
 
 export interface AssistantReply {
@@ -67,7 +68,7 @@ export interface AssistantReply {
 }
 
 const ISSUE_KEY = /^[A-Z][A-Z0-9]*-\d+$/;
-const SIMPLE = new Set(["status", "metrics", "budget", "list", "peek", "kill", "stop", "auto", "help", "confirm", "cancel"]);
+const SIMPLE = new Set(["status", "metrics", "budget", "list", "peek", "kill", "stop", "auto", "help", "cancel"]);
 
 // The answer is free text; a command, if any, is one last line "ДЕЙСТВИЕ: {json}".
 // Anything malformed is dropped rather than guessed at: a wrong command is worse than
@@ -94,6 +95,10 @@ function validateAction(value: unknown): AssistantAction | undefined {
   const v = value as Record<string, unknown>;
   const type = String(v.type ?? "");
   if (SIMPLE.has(type)) return { type } as AssistantAction;
+  if (type === "confirm") {
+    const note = typeof v.note === "string" && v.note.trim() ? v.note.trim().slice(0, 1500) : undefined;
+    return note ? { type: "confirm", note } : { type: "confirm" };
+  }
   const key = String(v.key ?? "").trim().toUpperCase();
   if (type === "retry" && ISSUE_KEY.test(key)) return { type: "retry", key };
   if (type === "propose" && ISSUE_KEY.test(key)) {
@@ -161,6 +166,9 @@ export function buildAssistantPrompt(input: {
     "      анализ уже ответил «менять нечего», а CEO хочет делать всё равно. note — указание CEO своими",
     "      словами: что именно сделать или на что обратить внимание; оно пойдёт агенту вместе с тикетом.",
     '   {"type":"confirm"} — взять в работу предложение, которое ждёт подтверждения;',
+    '   {"type":"confirm","note":"..."} — CEO согласен, но с поправкой или уточнением к плану. note —',
+    "      поправка его словами, без сокращений. План пересоберут с ней и пришлют на подтверждение заново:",
+    "      без note поправка потеряется, агент сделает исходный план.",
     '   {"type":"cancel"} — не брать это предложение.',
     "   Одно действие за раз. Действие — только когда CEO явно просит что-то сделать; на вопрос просто",
     "   ответь. Если просьба неоднозначна (какой тикет? где делать?) — переспроси, а не угадывай.",

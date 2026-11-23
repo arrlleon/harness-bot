@@ -834,7 +834,7 @@ export async function startBot(): Promise<void> {
   }
 
   // Shared by the "✖️ Не брать" button and the chat assistant's `cancel`.
-  function dropPendingProposal(): void {
+  function dropPendingProposal(detail = "отменено пользователем"): void {
     const cancelled = cancelPending();
     if (cancelled) {
       // Direct recordTask, not the generic recordOutcome helper: the analysis
@@ -843,7 +843,7 @@ export async function startBot(): Promise<void> {
       recordTask(state, {
         issueKey: cancelled.issueKey,
         outcome: "skipped",
-        detail: "отменено пользователем",
+        detail,
         costUsd: cancelled.costUsd,
         timestamp: new Date().toISOString(),
       });
@@ -1136,6 +1136,13 @@ export async function startBot(): Promise<void> {
         case "confirm": {
           const pending = getLiveState().pendingApproval;
           if (!pending) return void (await ctx.reply("Сейчас нет предложения, которое ждёт подтверждения."));
+          // A confirmation with a correction used to start the original plan and drop the
+          // correction on the floor (XEN-1026, 2026-11-23): the frozen criteria never saw
+          // it. The plan is redone with the note instead, and comes back for approval.
+          if (action.note) {
+            dropPendingProposal("план пересобран с уточнением");
+            return void (await runPropose(ctx, pending.issueKey, { note: action.note }));
+          }
           await ctx.reply(`▶️ ${pending.issueKey}: взято в работу. Раз в 5 минут пишу, что делаю.`);
           return void startConfirmedWork(ctx, pending.issueKey);
         }
