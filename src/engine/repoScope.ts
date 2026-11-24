@@ -2,6 +2,7 @@ import { config, type RepoKind } from "../config.js";
 import type { TaskSpec } from "../types.js";
 import { runClaudeTurn } from "./claudeEngine.js";
 import { parseProposalResponse } from "./proposal.js";
+import { CRITERIA_RULES } from "./criteriaRules.js";
 import { readMemoryFiles, buildMemoryContextBlock } from "./memory.js";
 
 // Which repositories a ticket needs is decided here, from the code — not from a
@@ -131,6 +132,8 @@ export function buildScopePrompt(
     "- <ещё один>",
     "(3-7 критериев — что именно должно стать верным в этом репозитории, чтобы его часть",
     "считалась сделанной; формулируй так, чтобы по каждому можно было однозначно сказать да или нет)",
+    "",
+    ...CRITERIA_RULES,
   ].join("\n");
 }
 

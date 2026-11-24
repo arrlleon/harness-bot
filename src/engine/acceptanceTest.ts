@@ -1,6 +1,9 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { runClaudeTurn } from "./claudeEngine.js";
+import { buildRemovePlaceholdersPrompt, findPlaceholderTests } from "./acceptancePlaceholders.js";
 import type { TaskSpec } from "../types.js";
 
 const execFileAsync = promisify(execFile);
@@ -34,8 +37,9 @@ export function buildAcceptanceTestPrompt(task: TaskSpec, relPath: string): stri
     "- Каждый критерий приёмки — отдельный it()/test() с понятным описанием.",
     "- Проверяй через публичное поведение (эндпоинт, сервис, компонент), а не",
     "  через внутренние детали реализации, которых ещё не существует.",
-    "- Если критерий технически не проверяем автоматическим тестом, напиши",
-    "  test.skip(...) с комментарием почему — не выдумывай фиктивную проверку.",
+    "- Критерий, который тест проверить не может (tsc, eslint, сборка, «тесты добавлены»),",
+    "  в файл не включай вовсе: его проверяют гейты. Никаких test.skip / it.todo-заглушек",
+    "  и фиктивных проверок.",
   ].join("\n");
 }
 
@@ -118,10 +122,32 @@ export async function writeAcceptanceTest(
     return { ok: false, relPath, costUsd: turn.totalCostUsd, reason: `ход завершился ошибкой: ${turn.resultText.slice(0, 200)}` };
   }
 
-  const verified = await verifyOnlyExpectedFileTouched(worktreeDir, relPath);
+  let costUsd = turn.totalCostUsd;
+  let verified = await verifyOnlyExpectedFileTouched(worktreeDir, relPath);
   if (!verified.ok) {
     await discardAcceptanceTestAttempt(worktreeDir);
-    return { ok: false, relPath, costUsd: turn.totalCostUsd, reason: verified.reason };
+    return { ok: false, relPath, costUsd, reason: verified.reason };
+  }
+
+  // The file is frozen from here on: a skip/todo placeholder left in it would ride into
+  // the merge request. One follow-up in the same session to drop them.
+  const placeholders = findPlaceholderTests(await readFile(join(worktreeDir, relPath), "utf8"));
+  if (placeholders.length > 0) {
+    const cleanup = await runClaudeTurn({
+      cwd: worktreeDir,
+      prompt: buildRemovePlaceholdersPrompt(relPath, placeholders),
+      permissionMode: "acceptEdits",
+      resumeSessionId: turn.sessionId,
+      extraDeniedPaths: opts.extraDeniedPaths,
+      model: opts.model,
+      maxBudgetUsd: opts.maxBudgetUsd,
+    });
+    costUsd += cleanup.totalCostUsd;
+    verified = await verifyOnlyExpectedFileTouched(worktreeDir, relPath);
+    if (cleanup.isError || !verified.ok) {
+      await discardAcceptanceTestAttempt(worktreeDir);
+      return { ok: false, relPath, costUsd, reason: verified.reason ?? "не удалось убрать заглушки test.skip" };
+    }
   }
 
   await execFileAsync("git", ["add", relPath], { cwd: worktreeDir });
@@ -131,5 +157,5 @@ export async function writeAcceptanceTest(
     { cwd: worktreeDir },
   );
 
-  return { ok: true, relPath, costUsd: turn.totalCostUsd };
+  return { ok: true, relPath, costUsd };
 }

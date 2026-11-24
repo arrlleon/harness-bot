@@ -1,4 +1,5 @@
 import { Bot, InlineKeyboard, type Context } from "grammy";
+import { currentBehaviourClaims } from "../engine/criteriaRules.js";
 import { config } from "../config.js";
 import {
   loadState,
@@ -170,6 +171,7 @@ export function formatProposal(p: Proposal): string {
       ? `Где: ${where}\nНе трогаю: ${skipped.map((m) => `${m[1]} — ${m[2].length > 160 ? m[2].slice(0, 159) + "…" : m[2]}`).join("; ")}`
       : `Где: ${where}`;
   const criteriaCount = p.acceptanceCriteria.length;
+  const claims = currentBehaviourClaims(p.acceptanceCriteria);
   const header = [
     `${escapeMarkdownV2(headline("proposal"))} · *${escapeMarkdownV2(p.issueKey)}*`,
     escapeMarkdownV2(p.title),
@@ -179,6 +181,11 @@ export function formatProposal(p: Proposal): string {
     criteriaCount > 0
       ? escapeMarkdownV2(`Критерии приёмки: ${criteriaCount} — в блоке ниже`)
       : escapeMarkdownV2("Критериев нет — зафиксируется только план"),
+    // The kind of criterion the analysis got wrong (XEN-1025): "stays as it is", while the
+    // code did otherwise. Frozen, it forces the developer to make it true.
+    ...(claims.length > 0
+      ? [escapeMarkdownV2(`⚠️ Сверь критерии ${claims.join(", ")}: они утверждают, что поведение сохраняется; если это не так, поправь их уточнением`)]
+      : []),
     // toFixed's decimal point is itself a reserved MarkdownV2 character — reproduced
     // live ("Character '.' is reserved"), easy to miss since it looks like plain text.
     `Анализ стоил $${escapeMarkdownV2(p.costUsd.toFixed(2))}${formatCostEstimate(p.costEstimate)}`,

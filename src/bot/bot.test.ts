@@ -165,3 +165,14 @@ test("formatProposal prefers the analysis's plain summary over the plan's first 
   assert.match(visible, /Что сделаю: добавлю список активных клиентов/);
   assert.doesNotMatch(visible, /путями/);
 });
+
+test("formatProposal points at criteria that claim behaviour stays as it is (XEN-1025)", () => {
+  const text = plainFromMarkdownV2(
+    formatProposal({
+      ...baseProposal,
+      acceptanceCriteria: ["Подписант получает 200", "Автор продолжает скачивать файл — поведение не меняется"],
+    }),
+  );
+  assert.match(text, /Сверь критерии 2/);
+  assert.doesNotMatch(plainFromMarkdownV2(formatProposal({ ...baseProposal, acceptanceCriteria: ["Подписант получает 200"] })), /Сверь критерии/);
+});

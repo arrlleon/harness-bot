@@ -9,6 +9,7 @@ import { parseProposalResponse, parseWrongRepoSignal } from "./engine/proposal.j
 import { readMemoryFiles, buildMemoryContextBlock } from "./engine/memory.js";
 import { analyzeRepoScope, type RepoScope, type ScopeOptions } from "./engine/repoScope.js";
 import { createMergeRequest, deleteRemoteBranch, pushBranch } from "./gitlab.js";
+import { CRITERIA_RULES } from "./engine/criteriaRules.js";
 import {
   startJob,
   updateJob,
@@ -233,6 +234,8 @@ async function proposeSolution(
     "- <ещё один>",
     "(3-7 критериев — что именно должно стать верным, чтобы задача считалась решённой;",
     "формулируй так, чтобы по каждому можно было однозначно сказать да или нет)",
+    "",
+    ...CRITERIA_RULES,
   ].join("\n");
   const turn = await runClaudeTurn({
     cwd: repoPath,
