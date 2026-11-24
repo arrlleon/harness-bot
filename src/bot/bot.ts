@@ -1,5 +1,5 @@
 import { Bot, InlineKeyboard, type Context } from "grammy";
-import { currentBehaviourClaims } from "../engine/criteriaRules.js";
+import { currentBehaviourClaims, ticketPlacesMissingFromPlan } from "../engine/criteriaRules.js";
 import { config } from "../config.js";
 import {
   loadState,
@@ -172,6 +172,7 @@ export function formatProposal(p: Proposal): string {
       : `Где: ${where}`;
   const criteriaCount = p.acceptanceCriteria.length;
   const claims = currentBehaviourClaims(p.acceptanceCriteria);
+  const missingPlaces = p.description ? ticketPlacesMissingFromPlan(p.description, [p.plan, ...p.acceptanceCriteria].join("\n")) : [];
   const header = [
     `${escapeMarkdownV2(headline("proposal"))} · *${escapeMarkdownV2(p.issueKey)}*`,
     escapeMarkdownV2(p.title),
@@ -185,6 +186,10 @@ export function formatProposal(p: Proposal): string {
     // code did otherwise. Frozen, it forces the developer to make it true.
     ...(claims.length > 0
       ? [escapeMarkdownV2(`⚠️ Сверь критерии ${claims.join(", ")}: они утверждают, что поведение сохраняется; если это не так, поправь их уточнением`)]
+      : []),
+    // Places the ticket itself names that the plan doesn't touch (XEN-1026, XEN-1111).
+    ...(missingPlaces.length > 0
+      ? [escapeMarkdownV2(`⚠️ Тикет называет, а в плане нет: ${missingPlaces.slice(0, 5).join(", ")} — не забыты ли`)]
       : []),
     // toFixed's decimal point is itself a reserved MarkdownV2 character — reproduced
     // live ("Character '.' is reserved"), easy to miss since it looks like plain text.

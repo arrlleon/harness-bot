@@ -151,6 +151,8 @@ export interface Proposal {
   title: string;
   repo: string;
   descriptionShort: string;
+  // Full ticket text, for the places-missing-from-plan hint; absent on older paths.
+  description?: string;
   plan: string;
   // One plain sentence for the CEO (engine/repoScope.ts); absent on older paths.
   summary?: string;
@@ -332,6 +334,7 @@ async function proposeByCodeScope(
     issueKey: issue.key,
     title: issue.summary,
     repo: analysis.scope,
+    description: issue.description,
     descriptionShort: issue.description.slice(0, 300),
     plan: withSkippedRepos(analysis.plan, analysis.skippedRepos),
     summary: analysis.summary || undefined,
@@ -401,6 +404,7 @@ async function proposeIssue(
         issueKey: issue.key,
         title: issue.summary,
         repo: "cross",
+        description: issue.description,
         descriptionShort: issue.description.slice(0, 300),
         plan,
         acceptanceCriteria,
@@ -467,6 +471,7 @@ async function proposeIssue(
       issueKey: issue.key,
       title,
       repo: repoKind,
+      description: issue.description,
       descriptionShort: issue.description.slice(0, 300),
       plan,
       acceptanceCriteria,
@@ -742,7 +747,7 @@ export async function runQueueOnce(): Promise<ProposeOutcome> {
   return proposeNext();
 }
 
-type RepoHandle = { path: string; gates: GateSpec[]; gitlabProjectPath: string; acceptanceRunner: string; acceptanceTestExt: string };
+type RepoHandle = { path: string; gates: GateSpec[]; gitlabProjectPath: string; acceptanceRunner: string; acceptanceTestExt: string; cloneNodeModules?: boolean };
 
 type CloseAndPushFailureKind = "loop" | "no_token" | "push";
 
@@ -844,6 +849,7 @@ export async function closeLoopAndPush(
 
   const result = await runCloseLoop(task, {
     repoPath: repo.path,
+    cloneNodeModules: repo.cloneNodeModules,
     branchName,
     gates: repo.gates,
     maxIterations: config.maxIterations,

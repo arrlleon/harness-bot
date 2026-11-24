@@ -176,3 +176,14 @@ test("formatProposal points at criteria that claim behaviour stays as it is (XEN
   assert.match(text, /Сверь критерии 2/);
   assert.doesNotMatch(plainFromMarkdownV2(formatProposal({ ...baseProposal, acceptanceCriteria: ["Подписант получает 200"] })), /Сверь критерии/);
 });
+
+test("formatProposal points at places the ticket names but the plan skips (XEN-1026, XEN-1111)", () => {
+  const text = plainFromMarkdownV2(
+    formatProposal({
+      ...baseProposal,
+      description: "_Для разработчика:_ кнопки на {{client/documents/page.tsx}} и в {{client/documents/[id]/page.tsx}}",
+      plan: "Поправлю гейты на client/documents/page.tsx",
+    }),
+  );
+  assert.match(text, /Тикет называет, а в плане нет: client\/documents\/\[id\]\/page\.tsx/);
+});
