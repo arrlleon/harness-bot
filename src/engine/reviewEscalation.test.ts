@@ -45,3 +45,15 @@ test("needsHumanDecision stops only on an escalated finding, not on an ordinary 
   assert.equal(needsHumanDecision([{ blocking: true, description: "SQL-инъекция в фильтре" }]), false);
   assert.equal(needsHumanDecision([]), false);
 });
+
+test("needsHumanDecision stops on a dispute or a finding that hands the decision to a human (XEN-1111)", () => {
+  for (const description of [
+    "[СПОР] карточка считает флаг на клиенте; разработчик сослался на GET /documents/:id, но…",
+    "карточка документа считает право на фронте … Решение о том, расширять ли доступ клиентским расчётом, должен принять человек.",
+    "это расширение доступа вне буквы критерия, и решать его должен человек",
+    "Решение о расширении прав принимает человек, а не ревьюер.",
+  ]) {
+    assert.equal(needsHumanDecision([{ blocking: true, description }]), true, description);
+  }
+  assert.equal(needsHumanDecision([{ blocking: true, description: "человек может перепутать кнопки — переименовать" }]), false);
+});

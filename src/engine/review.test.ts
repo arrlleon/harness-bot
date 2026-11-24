@@ -130,3 +130,20 @@ test("buildReviewPrompt makes widened access and out-of-scope behaviour blocking
   assert.match(prompt, /расширяет\s+чьи-то права или доступ/);
   assert.match(prompt, /критерий противоречит текущему поведению/);
 });
+
+test("buildReviewPrompt asks to check claims in the code before blocking on them", () => {
+  const prompt = buildReviewPrompt(task, "diff --git a/x b/x");
+  assert.match(prompt, /проверь утверждение по коду/);
+  assert.doesNotMatch(prompt, /Прошлый раунд/);
+});
+
+test("buildReviewPrompt shows the last round's findings and the developer's reply, and how to keep a dispute", () => {
+  const prompt = buildReviewPrompt(task, "diff --git a/x b/x", {
+    blocking: [{ blocking: true, description: "карточка считает флаг на клиенте" }],
+    developerReply: "GET /documents/:id флаг не отдаёт, поэтому считаю по маршруту — то же правило, что на сервере.",
+  });
+  assert.match(prompt, /Прошлый раунд/);
+  assert.match(prompt, /карточка считает флаг на клиенте/);
+  assert.match(prompt, /GET \/documents\/:id флаг не отдаёт/);
+  assert.match(prompt, /\[СПОР\]/);
+});

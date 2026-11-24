@@ -45,6 +45,12 @@ export function escalateScopeFindings(findings: ReviewFinding[]): ReviewFinding[
 // criterion the developer is not allowed to change, so fix rounds could only burn
 // budget arguing with the test; whether the criterion or the code is wrong is the
 // human's call.
+// The same goes for a blocking finding the reviewer itself hands to a human: a dispute
+// it keeps after the developer's reply ([СПОР], see review.ts) or any finding that says
+// a person must decide. XEN-1111 ran two more rounds on such a finding — the reviewer
+// wrote "решать должен человек" and the loop sent it back to the developer anyway.
+const HUMAN_DECIDES = /^\s*\[СПОР\]|реша(?:ет|ть|ю)\s+(?:\S+\s+){0,2}человек|(?:принимает|принять|примет)\s+(?:\S+\s+){0,2}человек|human (?:should|must|has to) decide/i;
+
 export function needsHumanDecision(blocking: ReviewFinding[]): boolean {
-  return blocking.some((f) => f.description.startsWith(ESCALATION_NOTE));
+  return blocking.some((f) => f.description.startsWith(ESCALATION_NOTE) || HUMAN_DECIDES.test(f.description));
 }

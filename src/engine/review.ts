@@ -29,7 +29,34 @@ function truncationNote(diffText: string): string[] {
   ];
 }
 
-export function buildReviewPrompt(task: TaskSpec, diffText: string): string {
+// What the reviewer raised last round and how the developer answered. Without it every
+// round reviewed the diff from scratch and repeated a finding the developer had already
+// refuted (XEN-1111: the same "the card computes the flag on the client" three rounds in
+// a row, then a stop) — the reviewer never saw the reply.
+export interface PreviousReviewRound {
+  blocking: ReviewFinding[];
+  developerReply: string;
+}
+
+const MAX_DEVELOPER_REPLY_CHARS = 4000;
+
+function previousRoundBlock(previous: PreviousReviewRound | undefined): string[] {
+  if (!previous) return [];
+  return [
+    "",
+    "Прошлый раунд. Твои блокирующие замечания:",
+    ...previous.blocking.map((f, i) => `${i + 1}. ${f.description}`),
+    "",
+    "Ответ разработчика (он мог исправить, а мог обоснованно возразить):",
+    previous.developerReply.trim().slice(0, MAX_DEVELOPER_REPLY_CHARS) || "(ответа нет)",
+    "",
+    "Не повторяй замечание по инерции. Если разработчик возразил, проверь его довод по коду:",
+    "убедил — сними замечание; нет — оставь его блокирующим, но начни строку с [СПОР] и",
+    "коротко напиши, в чём не согласен: такой спор решает человек, а не ещё один раунд.",
+  ];
+}
+
+export function buildReviewPrompt(task: TaskSpec, diffText: string, previous?: PreviousReviewRound): string {
   const criteria =
     task.acceptanceCriteria.length > 0
       ? task.acceptanceCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n")
@@ -54,6 +81,11 @@ export function buildReviewPrompt(task: TaskSpec, diffText: string): string {
     "гарантировано прошедшими тестами/типами/сборкой, и не придирайся к стилю,",
     "если он соответствует остальному проекту.",
     "",
+    "Прежде чем назвать что-то блокирующим, проверь утверждение по коду (Read/Grep): что",
+    "на самом деле разрешает или запрещает сервер, какие поля отдаёт эндпоинт, кто ещё",
+    "вызывает функцию. Блокирующее на догадке («сервер, возможно, не разрешает…») не пиши:",
+    "либо проверь и назови место в коде, либо перенеси в ЗАМЕЧАНИЯ.",
+    "",
     "Всегда БЛОКИРУЮЩЕЕ, даже если тебе кажется, что так задумано: изменение расширяет",
     "чьи-то права или доступ, ослабляет существующую проверку, или меняет поведение,",
     "о котором задача не просила. Такое решает человек, а не ревьюер. Если этого требует",
@@ -69,6 +101,7 @@ export function buildReviewPrompt(task: TaskSpec, diffText: string): string {
     "ЗАМЕЧАНИЯ:",
     "- <файл:строка — на что стоит обратить внимание, не блокирует>",
     "(если замечаний нет — напиши ровно НЕТ)",
+    ...previousRoundBlock(previous),
   ].join("\n");
 }
 
@@ -153,7 +186,7 @@ export function nextReviewModel(current: string, fallback: string | undefined, e
 export async function reviewChanges(
   worktreeDir: string,
   task: TaskSpec,
-  opts: { model: string; fallbackModel?: string; baseBranch: string; maxBudgetUsd?: number },
+  opts: { model: string; fallbackModel?: string; baseBranch: string; maxBudgetUsd?: number; previous?: PreviousReviewRound },
 ): Promise<ReviewOutcome> {
   // Not caught: an unreadable diff is an infrastructure failure, and reviewing "" would
   // just produce a confident approval of nothing.
@@ -169,7 +202,7 @@ export async function reviewChanges(
   for (let attempt = 0; attempt < 2; attempt++) {
     const turn = await runClaudeTurn({
       cwd: worktreeDir,
-      prompt: buildReviewPrompt(task, diffText),
+      prompt: buildReviewPrompt(task, diffText, opts.previous),
       permissionMode: "acceptEdits",
       disallowedToolsOverride: "Bash,Edit,Write,MultiEdit",
       model,

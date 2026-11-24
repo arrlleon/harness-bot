@@ -15,7 +15,7 @@ import { createWorktree, commitAll, fetchFreshBase, lockfileDrift, rebaseOntoFre
 import { writeAcceptanceTest } from "./acceptanceTest.js";
 import { readMemoryFiles, buildMemoryContextBlock, updateProjectMemory } from "./memory.js";
 import { fingerprintFailure } from "./stuckDetector.js";
-import { reviewChanges, buildReviewFixPrompt, formatReviewRound } from "./review.js";
+import { reviewChanges, buildReviewFixPrompt, formatReviewRound, type PreviousReviewRound } from "./review.js";
 import { needsHumanDecision } from "./reviewEscalation.js";
 import { generateTestingNotes } from "./testingNotes.js";
 import { generateCloseReport } from "./closeReport.js";
@@ -132,6 +132,9 @@ async function runPostImplementSuccess(
   }
 
   if (config.review) {
+    // The developer's answer to the last round's blocking findings, shown to the next
+    // review so it doesn't re-raise what was already refuted (see PreviousReviewRound).
+    let previousRound: PreviousReviewRound | undefined;
     for (let round = ctx.resumingFix?.round ?? 1; round <= config.review.maxRounds; round++) {
       reviewRounds = round;
       let blocking: ReviewFinding[];
@@ -154,7 +157,11 @@ async function runPostImplementSuccess(
         if (reviewBudget <= 0) {
           return { task, success: false, iterations, totalCostUsd, stopReason: "max_budget", worktreeDir, acceptanceTestPath };
         }
-        const reviewResult = await reviewChanges(worktreeDir, task, { ...config.review, maxBudgetUsd: reviewBudget });
+        const reviewResult = await reviewChanges(worktreeDir, task, {
+          ...config.review,
+          maxBudgetUsd: reviewBudget,
+          previous: previousRound,
+        });
         totalCostUsd += reviewResult.costUsd;
         reviewFindings = reviewResult.findings;
         writeTaskContext(task.id, "reviewer", `round-${round}.md`, formatReviewRound(reviewFindings, reviewResult.reason));
@@ -297,6 +304,7 @@ async function runPostImplementSuccess(
         };
       }
       await commitAll(worktreeDir, `${task.id}: fix review round ${round}\n\nAutomated by jira-harness.`);
+      previousRound = { blocking, developerReply: fixTurn.resultText };
     }
   }
 
