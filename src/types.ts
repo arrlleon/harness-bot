@@ -137,6 +137,8 @@ export interface GateResult {
 
 export interface EngineConfig {
   repoPath: string;
+  // See RepoConfig.cloneNodeModules.
+  cloneNodeModules?: boolean;
   branchName: string;
   gates: GateSpec[];
   maxIterations: number;

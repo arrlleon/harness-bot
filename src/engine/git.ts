@@ -2,7 +2,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { symlink, access, readFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
+import { provideNodeModules } from "./nodeModules.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -14,7 +15,12 @@ export function worktreeDirFor(branchName: string): string {
 // (the case's baseCommit) instead of the repo's current HEAD — everything else about
 // the worktree (symlinked node_modules, stale-registration recovery) works the same
 // either way. Omitted, this is the exact same call real tasks have always used.
-export async function createWorktree(repoPath: string, branchName: string, startPoint?: string): Promise<string> {
+export async function createWorktree(
+  repoPath: string,
+  branchName: string,
+  startPoint?: string,
+  opts: { cloneNodeModules?: boolean } = {},
+): Promise<string> {
   const dir = worktreeDirFor(branchName);
   // A prior run for the same ticket (crashed, killed, or left mid-flow) can leave this
   // exact worktree registered — `git worktree add` then refuses the directory outright,
@@ -38,7 +44,7 @@ export async function createWorktree(repoPath: string, branchName: string, start
     .then(() => true)
     .catch(() => false);
   if (hasNodeModules) {
-    await symlink(mainNodeModules, join(dir, "node_modules"), "dir").catch(() => {});
+    await provideNodeModules(mainNodeModules, join(dir, "node_modules"), opts.cloneNodeModules === true);
   }
 
   return dir;

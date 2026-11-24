@@ -32,6 +32,9 @@ export interface RepoConfig {
   // into the task's own commit on every gate run. `npx` sidesteps yarn entirely.
   acceptanceRunner: string;
   acceptanceTestExt: string;
+  // Give each worktree its own copy-on-write node_modules instead of a symlink (see
+  // engine/nodeModules.ts): `next build` refuses a symlinked one.
+  cloneNodeModules: boolean;
 }
 
 // typecheck/lint run before test (cheap, fast signal first) and build runs last
@@ -101,6 +104,7 @@ export const config = {
       gitlabProjectPath: process.env.BACKEND_GITLAB_PROJECT ?? "saqr/back-ai",
       acceptanceRunner: process.env.BACKEND_ACCEPTANCE_RUNNER ?? "npx jest",
       acceptanceTestExt: process.env.BACKEND_ACCEPTANCE_TEST_EXT ?? "spec.ts",
+      cloneNodeModules: process.env.BACKEND_CLONE_NODE_MODULES === "true",
     },
     frontend: {
       path: process.env.FRONTEND_REPO_PATH ?? "",
@@ -115,6 +119,7 @@ export const config = {
       // .test.ts and .test.tsx (see .env.example), so this was silently wrong for
       // every frontend task whose acceptance test needs to render a component.
       acceptanceTestExt: process.env.FRONTEND_ACCEPTANCE_TEST_EXT ?? "test.tsx",
+      cloneNodeModules: process.env.FRONTEND_CLONE_NODE_MODULES !== "false",
     },
   } satisfies Record<string, RepoConfig>,
   // No role here used an explicit --model before — every turn silently inherited
